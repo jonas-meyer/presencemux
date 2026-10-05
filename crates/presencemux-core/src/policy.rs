@@ -34,7 +34,7 @@ pub(crate) fn device_lowers(before: DeviceStatus, after: DeviceStatus) -> bool {
     before.is_ready() && !after.is_ready()
 }
 
-/// Returns `true` if the laptop is no longer connected. A suspend counts too,
+/// Returns `true` if the host is no longer connected. A suspend counts too,
 /// because the daemon can miss the short states of a new enumeration.
 pub(crate) fn host_lowers(before: HostStatus, after: HostStatus) -> bool {
     before == HostStatus::Connected && after != HostStatus::Connected

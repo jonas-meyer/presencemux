@@ -36,7 +36,7 @@ pub struct CamObserved {
     pub worker: DeviceStatus,
 }
 
-/// What the cam worker may send to the laptop.
+/// What the cam worker may send to the host.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum CamPermission {
     /// A frame with nothing from the room.

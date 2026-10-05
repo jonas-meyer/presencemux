@@ -46,7 +46,7 @@ pub struct MicObserved {
     pub gate: DeviceStatus,
 }
 
-/// What the audio chain may pass to the laptop.
+/// What the audio chain may pass to the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MicPermission {
     Denied,
