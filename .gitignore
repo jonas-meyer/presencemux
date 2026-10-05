@@ -1,0 +1,14 @@
+/target
+
+# rustfmt backups
+**/*.rs.bk
+
+# cargo-mutants results
+**/mutants.out*/
+
+# rustc internal compiler error reports
+rustc-ice-*.txt
+
+# insta: snapshots waiting for review
+*.snap.new
+*.pending-snap

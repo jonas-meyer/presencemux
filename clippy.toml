@@ -1,0 +1,2 @@
+# Proper names that doc_markdown must not ask to put in backticks.
+doc-valid-idents = ["PresenceMux", "GStreamer", "PipeWire", "WirePlumber", ".."]

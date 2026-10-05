@@ -1,0 +1,13 @@
+[package]
+name = "presencemux-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+insta = "1.49"
+proptest = "1.11"

@@ -1,0 +1,37 @@
+---
+source: crates/presencemux-core/tests/safety/policy.rs
+expression: table
+---
+desired | interface | gate | effective
+Muted | Missing | Missing | Denied
+Muted | Missing | Initializing | Denied
+Muted | Missing | Ready | Denied
+Muted | Missing | Fault | Denied
+Muted | Initializing | Missing | Denied
+Muted | Initializing | Initializing | Denied
+Muted | Initializing | Ready | Denied
+Muted | Initializing | Fault | Denied
+Muted | Ready | Missing | Denied
+Muted | Ready | Initializing | Denied
+Muted | Ready | Ready | Denied
+Muted | Ready | Fault | Denied
+Muted | Fault | Missing | Denied
+Muted | Fault | Initializing | Denied
+Muted | Fault | Ready | Denied
+Muted | Fault | Fault | Denied
+Unmuted | Missing | Missing | Denied
+Unmuted | Missing | Initializing | Denied
+Unmuted | Missing | Ready | Denied
+Unmuted | Missing | Fault | Denied
+Unmuted | Initializing | Missing | Denied
+Unmuted | Initializing | Initializing | Denied
+Unmuted | Initializing | Ready | Denied
+Unmuted | Initializing | Fault | Denied
+Unmuted | Ready | Missing | Denied
+Unmuted | Ready | Initializing | Denied
+Unmuted | Ready | Ready | Permitted
+Unmuted | Ready | Fault | Denied
+Unmuted | Fault | Missing | Denied
+Unmuted | Fault | Initializing | Denied
+Unmuted | Fault | Ready | Denied
+Unmuted | Fault | Fault | Denied

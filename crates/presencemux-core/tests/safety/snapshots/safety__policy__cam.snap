@@ -1,0 +1,53 @@
+---
+source: crates/presencemux-core/tests/safety/policy.rs
+expression: table
+---
+desired | camera | worker | effective
+Blank | Missing | Missing | Blank
+Blank | Missing | Initializing | Blank
+Blank | Missing | Ready | Blank
+Blank | Missing | Fault | Blank
+Blank | Initializing | Missing | Blank
+Blank | Initializing | Initializing | Blank
+Blank | Initializing | Ready | Blank
+Blank | Initializing | Fault | Blank
+Blank | Ready | Missing | Blank
+Blank | Ready | Initializing | Blank
+Blank | Ready | Ready | Blank
+Blank | Ready | Fault | Blank
+Blank | Fault | Missing | Blank
+Blank | Fault | Initializing | Blank
+Blank | Fault | Ready | Blank
+Blank | Fault | Fault | Blank
+Slate(SlateId(0)) | Missing | Missing | Blank
+Slate(SlateId(0)) | Missing | Initializing | Blank
+Slate(SlateId(0)) | Missing | Ready | Slate(SlateId(0))
+Slate(SlateId(0)) | Missing | Fault | Blank
+Slate(SlateId(0)) | Initializing | Missing | Blank
+Slate(SlateId(0)) | Initializing | Initializing | Blank
+Slate(SlateId(0)) | Initializing | Ready | Slate(SlateId(0))
+Slate(SlateId(0)) | Initializing | Fault | Blank
+Slate(SlateId(0)) | Ready | Missing | Blank
+Slate(SlateId(0)) | Ready | Initializing | Blank
+Slate(SlateId(0)) | Ready | Ready | Slate(SlateId(0))
+Slate(SlateId(0)) | Ready | Fault | Blank
+Slate(SlateId(0)) | Fault | Missing | Blank
+Slate(SlateId(0)) | Fault | Initializing | Blank
+Slate(SlateId(0)) | Fault | Ready | Slate(SlateId(0))
+Slate(SlateId(0)) | Fault | Fault | Blank
+Live | Missing | Missing | Blank
+Live | Missing | Initializing | Blank
+Live | Missing | Ready | Blank
+Live | Missing | Fault | Blank
+Live | Initializing | Missing | Blank
+Live | Initializing | Initializing | Blank
+Live | Initializing | Ready | Blank
+Live | Initializing | Fault | Blank
+Live | Ready | Missing | Blank
+Live | Ready | Initializing | Blank
+Live | Ready | Ready | Live
+Live | Ready | Fault | Blank
+Live | Fault | Missing | Blank
+Live | Fault | Initializing | Blank
+Live | Fault | Ready | Blank
+Live | Fault | Fault | Blank
