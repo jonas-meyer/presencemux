@@ -5,7 +5,7 @@ use presencemux_core::{
 use proptest::prelude::*;
 use proptest::sample::select;
 
-pub const STATUSES: [DeviceStatus; 4] = [
+pub(crate) const STATUSES: [DeviceStatus; 4] = [
     DeviceStatus::Missing,
     DeviceStatus::Initializing,
     DeviceStatus::Ready,
@@ -13,7 +13,7 @@ pub const STATUSES: [DeviceStatus; 4] = [
 ];
 
 /// Returns a controller after the given events.
-pub fn after(events: impl IntoIterator<Item = Event>) -> Controller {
+pub(crate) fn after(events: impl IntoIterator<Item = Event>) -> Controller {
     let (mut controller, _) = Controller::new();
     for event in events {
         let _ = controller.handle_input(event);
@@ -23,7 +23,7 @@ pub fn after(events: impl IntoIterator<Item = Event>) -> Controller {
 
 /// Returns the cause of a plane after automation lowers it. A plane that was
 /// already off keeps its cause.
-pub fn cause_after_lowering(before: PlaneSummary, cause: Cause) -> Option<Cause> {
+pub(crate) fn cause_after_lowering(before: PlaneSummary, cause: Cause) -> Option<Cause> {
     if before.requested > OnAir::Off {
         Some(cause)
     } else {
@@ -31,20 +31,20 @@ pub fn cause_after_lowering(before: PlaneSummary, cause: Cause) -> Option<Cause>
     }
 }
 
-pub fn device() -> impl Strategy<Value = Device> {
+pub(crate) fn device() -> impl Strategy<Value = Device> {
     select(&Device::ALL[..])
 }
 
-pub fn device_status() -> impl Strategy<Value = DeviceStatus> {
+pub(crate) fn device_status() -> impl Strategy<Value = DeviceStatus> {
     select(&STATUSES[..])
 }
 
-pub fn not_ready() -> impl Strategy<Value = DeviceStatus> {
+pub(crate) fn not_ready() -> impl Strategy<Value = DeviceStatus> {
     let statuses: Vec<_> = STATUSES.into_iter().filter(|s| !s.is_ready()).collect();
     select(statuses)
 }
 
-pub fn host_status() -> impl Strategy<Value = HostStatus> {
+pub(crate) fn host_status() -> impl Strategy<Value = HostStatus> {
     select(
         &[
             HostStatus::Disconnected,
@@ -54,11 +54,11 @@ pub fn host_status() -> impl Strategy<Value = HostStatus> {
     )
 }
 
-pub fn not_connected() -> impl Strategy<Value = HostStatus> {
+pub(crate) fn not_connected() -> impl Strategy<Value = HostStatus> {
     select(&[HostStatus::Disconnected, HostStatus::Suspended][..])
 }
 
-pub fn plane() -> impl Strategy<Value = PlaneId> {
+pub(crate) fn plane() -> impl Strategy<Value = PlaneId> {
     select(&PlaneId::ALL[..])
 }
 
@@ -75,12 +75,12 @@ fn mic() -> impl Strategy<Value = MicMute> {
 }
 
 /// Any preset, not only the configured ones.
-pub fn preset() -> impl Strategy<Value = Preset> {
+pub(crate) fn preset() -> impl Strategy<Value = Preset> {
     (proptest::option::of(cam()), proptest::option::of(mic()))
         .prop_map(|(cam, mic)| Preset { cam, mic })
 }
 
-pub fn observation() -> impl Strategy<Value = Observation> {
+pub(crate) fn observation() -> impl Strategy<Value = Observation> {
     prop_oneof![
         4 => (device(), device_status()).prop_map(|(d, s)| Observation::Device(d, s)),
         1 => plane().prop_map(Observation::LeaseExpired),
@@ -88,17 +88,17 @@ pub fn observation() -> impl Strategy<Value = Observation> {
     ]
 }
 
-pub fn event() -> impl Strategy<Value = Event> {
+pub(crate) fn event() -> impl Strategy<Value = Event> {
     prop_oneof![
         1 => preset().prop_map(|p| Command::Apply(p).into()),
         3 => observation().prop_map(Event::from),
     ]
 }
 
-pub fn events() -> impl Strategy<Value = Vec<Event>> {
+pub(crate) fn events() -> impl Strategy<Value = Vec<Event>> {
     prop::collection::vec(event(), 0..64)
 }
 
-pub fn observations() -> impl Strategy<Value = Vec<Observation>> {
+pub(crate) fn observations() -> impl Strategy<Value = Vec<Observation>> {
     prop::collection::vec(observation(), 0..32)
 }

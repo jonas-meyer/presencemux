@@ -246,107 +246,6 @@ mod tests {
     }
 
     #[test]
-    fn unmuted_mic_stays_denied_while_the_gate_is_not_ready() {
-        let mut controller = after(&[device(Device::AudioInterface, Ready)]);
-
-        let _ = controller.handle_input(live());
-
-        assert_eq!(controller.mic().target().permission, MicPermission::Denied);
-    }
-
-    #[test]
-    fn camera_fault_lowers_only_cam() {
-        let mut controller = after(&[
-            device(Device::Camera, Ready),
-            device(Device::AudioInterface, Ready),
-            device(Device::Gate, Ready),
-            live(),
-        ]);
-
-        let _ = controller.handle_input(device(Device::Camera, Fault));
-
-        assert_eq!(controller.cam().desired(), CamPermission::Blank);
-        assert_eq!(
-            controller.cam().cause(),
-            Some(Cause::DeviceFault(Device::Camera))
-        );
-        assert_eq!(controller.mic().desired(), MicMute::Unmuted);
-    }
-
-    #[test]
-    fn returning_camera_does_not_go_live() {
-        let mut controller = after(&[
-            device(Device::Camera, Ready),
-            device(Device::CamWorker, Ready),
-            live(),
-            device(Device::Camera, Fault),
-        ]);
-
-        let effects = controller.handle_input(device(Device::Camera, Ready));
-
-        assert_eq!(effects.cam, None);
-        assert_eq!(controller.cam().target().permission, CamPermission::Blank);
-    }
-
-    #[test]
-    fn lapsed_lease_lowers_only_its_plane_with_the_cause() {
-        let mut controller = after(&[
-            device(Device::AudioInterface, Ready),
-            device(Device::Gate, Ready),
-            live(),
-        ]);
-
-        let effects = controller.handle_input(Observation::LeaseExpired(PlaneId::Mic).into());
-
-        assert_eq!(
-            effects.mic.map(|g| g.permission),
-            Some(MicPermission::Denied)
-        );
-        assert_eq!(controller.mic().cause(), Some(Cause::ControllerStalled));
-        assert_eq!(controller.cam().desired(), CamPermission::Live);
-    }
-
-    #[test]
-    fn host_reconnect_leaves_every_plane_off() {
-        let mut controller = after(&[
-            device(Device::Camera, Ready),
-            device(Device::CamWorker, Ready),
-            device(Device::AudioInterface, Ready),
-            device(Device::Gate, Ready),
-            Observation::Host(HostStatus::Connected).into(),
-            live(),
-            Observation::Host(HostStatus::Disconnected).into(),
-        ]);
-
-        let _ = controller.handle_input(Observation::Host(HostStatus::Connected).into());
-
-        assert_eq!(controller.cam().target().permission, CamPermission::Blank);
-        assert_eq!(controller.mic().target().permission, MicPermission::Denied);
-        assert_eq!(
-            controller.mic().cause(),
-            Some(Cause::Host(HostStatus::Disconnected))
-        );
-    }
-
-    #[test]
-    fn host_suspend_lowers_every_plane() {
-        let mut controller = after(&[
-            device(Device::AudioInterface, Ready),
-            device(Device::Gate, Ready),
-            Observation::Host(HostStatus::Connected).into(),
-            live(),
-        ]);
-
-        let _ = controller.handle_input(Observation::Host(HostStatus::Suspended).into());
-
-        assert_eq!(controller.mic().target().permission, MicPermission::Denied);
-        assert_eq!(
-            controller.mic().cause(),
-            Some(Cause::Host(HostStatus::Suspended))
-        );
-    }
-
-    #[test]
     fn health_is_degraded_while_a_device_is_missing() {
         let controller = after(&[
             device(Device::CamWorker, Ready),
@@ -374,18 +273,6 @@ mod tests {
         ]);
 
         assert_eq!(controller.health(), Health::Ready);
-    }
-
-    #[test]
-    fn lowering_a_plane_that_is_already_off_keeps_its_cause() {
-        let mut controller = after(&[
-            device(Device::AudioInterface, Ready),
-            device(Device::Gate, Ready),
-        ]);
-
-        let _ = controller.handle_input(device(Device::Gate, Fault));
-
-        assert_eq!(controller.mic().cause(), None);
     }
 
     #[test]

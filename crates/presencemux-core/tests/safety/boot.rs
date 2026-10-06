@@ -1,22 +1,23 @@
-use presencemux_core::{
-    Cam, CamPermission, Controller, Effects, Epoch, Mic, MicMute, OnAir, Plane, Preset,
-    PrivacyPlane,
-};
+use presencemux_core::{Cam, Controller, Effects, Epoch, Mic, OnAir, Plane, Preset, PrivacyPlane};
 
 #[test]
-fn applies_privacy_with_safe_targets() {
-    let (controller, effects) = Controller::new();
+fn applies_privacy() {
+    let (controller, _) = Controller::new();
 
     assert_eq!(
-        Preset::PRIVACY,
         Preset {
             cam: Some(controller.cam().desired()),
             mic: Some(controller.mic().desired()),
-        }
+        },
+        Preset::PRIVACY
     );
-    assert_eq!(controller.cam().desired(), CamPermission::Blank);
-    assert_eq!(controller.mic().desired(), MicMute::Muted);
     assert_eq!(controller.epoch(), Epoch::BOOT);
+}
+
+#[test]
+fn effects_are_the_safe_targets() {
+    let (_, effects) = Controller::new();
+
     assert_eq!(
         effects,
         Effects {
@@ -25,6 +26,10 @@ fn applies_privacy_with_safe_targets() {
             status_changed: false,
         }
     );
+}
+
+#[test]
+fn safe_targets_are_off() {
     assert_eq!(Cam::on_air(Cam::SAFE.permission), OnAir::Off);
     assert_eq!(Mic::on_air(Mic::SAFE.permission), OnAir::Off);
 }
