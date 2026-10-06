@@ -1,3 +1,3 @@
-//! presencemuxctl: CLI client for presencemuxd.
+//! A command-line client for presencemuxd.
 
 fn main() {}
