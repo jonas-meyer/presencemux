@@ -8,12 +8,15 @@ publish.workspace = true
 [dependencies]
 presencemux-api.workspace = true
 presencemux-core.workspace = true
+rustix = { workspace = true, features = ["time"] }
 serde.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

@@ -2,10 +2,11 @@
 
 #![expect(
     dead_code,
-    reason = "the event loop uses these modules in the next step"
+    reason = "main wires these modules together in a later step"
 )]
 
 mod config;
+mod event_loop;
 mod status;
 
 fn main() {}

@@ -1,0 +1,3 @@
+[profile.default]
+# A test that waits on a channel can hang when time is paused.
+slow-timeout = { period = "30s", terminate-after = 2 }
