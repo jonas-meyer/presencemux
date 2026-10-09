@@ -8,5 +8,6 @@
 mod config;
 mod event_loop;
 mod status;
+mod varlink;
 
 fn main() {}

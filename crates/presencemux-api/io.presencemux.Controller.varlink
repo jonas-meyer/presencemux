@@ -1,0 +1,64 @@
+#  Controls the privacy of the camera and the microphone.
+interface io.presencemux.Controller
+
+#  The state of the cam plane. Its values are `blank`, `live` or a slate name.
+type CamStatus (#  The value that the user asked for.
+desired: string, #  The value that the cam worker shows.
+effective: string, #  Why automation lowered the plane. Null after the user sets the plane.
+cause: ?Cause)
+
+#  The state of the mic plane.
+type MicStatus (#  The value that the user asked for.
+desired: Mute, #  Whether the gate lets audio through.
+effective: Permission, #  Why automation lowered the plane. Null after the user sets the plane.
+cause: ?Cause)
+
+type Mute (muted, unmuted)
+
+type Permission (denied, permitted)
+
+#  The USB connection to the computer on the other side of the gadget.
+type Host (disconnected, suspended, connected)
+
+#  The health of the devices. `degraded` means that a device is missing or
+#  starts.
+type Health (ready, degraded, fault)
+
+#  The reason why automation lowered a plane.
+type Cause (camera_fault, cam_worker_fault, audio_interface_fault, gate_fault, controller_stalled, host_disconnected, host_suspended, host_connected)
+
+#  Returns the status.
+method Describe() -> (cam: CamStatus, mic: MicStatus, host: Host, health: Health, #  The last preset that the user applied. Null after the user changes a
+#  single plane.
+preset: ?string)
+
+#  Returns the status, then the status after each change. Without `more`,
+#  it returns the status once.
+method SubscribeStatus() -> (cam: CamStatus, mic: MicStatus, host: Host, health: Health, #  The last preset that the user applied. Null after the user changes a
+#  single plane.
+preset: ?string)
+
+#  Applies `privacy` or a configured preset.
+method ApplyPreset(name: string) -> ()
+
+#  Sets the cam to `blank`, `live` or a slate name.
+method SetCam(cam: string) -> ()
+
+#  Mutes or unmutes the mic.
+method SetMicMute(muted: bool) -> ()
+
+#  Returns the names of the configured presets. `privacy` is built in and
+#  not in the list.
+method ListPresets() -> (presets: []string)
+
+#  The preset is not `privacy` and not configured.
+error NoSuchPreset ()
+
+#  The cam value is not `blank`, `live` or a configured slate.
+error NoSuchSlate ()
+
+#  The daemon has too many requests to handle. Try again.
+error TooManyRequests ()
+
+#  The daemon is stopping.
+error NotAvailable ()

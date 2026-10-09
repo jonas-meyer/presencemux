@@ -11,13 +11,18 @@ publish = false
 [workspace.dependencies]
 presencemux-api = { path = "crates/presencemux-api" }
 presencemux-core = { path = "crates/presencemux-core" }
+expect-test = "1.5"
+futures-core = "0.3"
 rustix = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.27"
 thiserror = "2.0"
 tokio = "1.53"
+tokio-stream = "0.1"
 toml = "1.1"
+tracing = "0.1"
+zlink = { version = "0.7", default-features = false, features = ["tokio", "tracing"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -114,6 +114,11 @@ impl Config {
         Ok(Self { presets, slates })
     }
 
+    /// Returns the names of the configured presets, in order.
+    pub(crate) fn preset_names(&self) -> impl Iterator<Item = &str> {
+        self.presets.keys().map(PresetName::as_str)
+    }
+
     /// Returns the preset that an API name refers to.
     pub(crate) fn preset(&self, name: &str) -> Result<(PresetRef, Preset), UnknownPreset> {
         match name {
