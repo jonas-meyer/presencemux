@@ -56,7 +56,7 @@ impl Epoch {
         self.0
     }
 
-    // Saturates, because a wrapped epoch would look older than the last grant.
+    /// Returns the next epoch. It saturates at the maximum.
     pub(crate) const fn next(self) -> Self {
         Self(self.0.saturating_add(1))
     }

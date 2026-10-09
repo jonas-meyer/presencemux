@@ -4,8 +4,7 @@ use proptest::prelude::*;
 use crate::support::{after, events, observation};
 
 proptest! {
-    /// A device that starts can let a plane rise, but not above the earlier
-    /// request.
+    /// A device that starts can let a plane rise up to the earlier request.
     #[test]
     fn never_raises_a_plane(prefix in events(), next in observation()) {
         let mut controller = after(prefix);

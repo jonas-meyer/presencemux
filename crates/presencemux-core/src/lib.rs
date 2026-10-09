@@ -154,7 +154,7 @@ impl Controller {
     }
 
     fn apply(&mut self, preset: Preset) {
-        // Without `..`, a new field in `Preset` does not compile until it is handled here.
+        // Without `..`, a new field in `Preset` does not compile until this code handles it.
         let Preset { cam, mic } = preset;
         self.epoch = self.epoch.next();
         if let Some(cam) = cam {

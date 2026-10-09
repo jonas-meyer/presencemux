@@ -74,7 +74,7 @@ fn mic() -> impl Strategy<Value = MicMute> {
     prop_oneof![Just(MicMute::Muted), Just(MicMute::Unmuted)]
 }
 
-/// Any preset, not only the configured ones.
+/// Any preset, also one that no configuration has.
 pub(crate) fn preset() -> impl Strategy<Value = Preset> {
     (proptest::option::of(cam()), proptest::option::of(mic()))
         .prop_map(|(cam, mic)| Preset { cam, mic })

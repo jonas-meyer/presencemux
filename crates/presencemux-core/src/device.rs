@@ -33,8 +33,8 @@ pub enum DeviceStatus {
     Missing,
     Initializing,
     Ready,
-    /// Not working. The daemon also reports this when the owner of the device
-    /// stops reporting.
+    /// The device does not operate. The daemon also sets this status when the
+    /// owner of the device sends no more reports.
     Fault,
 }
 
