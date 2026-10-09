@@ -1,20 +1,31 @@
 //! The Varlink service `io.presencemux.Controller`.
 
+use std::convert::Infallible;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use presencemux_api::{
     CamStatus, Cause, Error, Health, Host, MicStatus, Mute, Permission, Presets, Status,
 };
 use presencemux_core::{MicMute, Preset};
+use rustix::io::Errno;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
+use tokio::time;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::{Stream, StreamExt};
 use zlink::{ReadyListener, Reply, Server};
 
 use crate::config::Config;
 use crate::event_loop::{Handle, HandleError, Request};
+
+/// The number of clients that the daemon serves at the same time. Further
+/// clients wait in the socket backlog. The limit keeps file descriptors free
+/// for the daemon itself, for example for the watchdog ping.
+pub(crate) const MAX_CONNECTIONS: usize = 256;
+
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
 /// The state that every connection shares.
 #[derive(Clone, Debug)]
@@ -24,13 +35,46 @@ pub(crate) struct Service {
     config: Arc<Config>,
 }
 
-/// Serves each connection with its own server. A client that stops reading
-/// blocks only its own connection.
-pub(crate) async fn serve(listener: UnixListener, service: Service) -> io::Result<()> {
+/// Serves each connection with its own server, up to `max_connections` at a
+/// time. A client that does not read its replies blocks its own connection and
+/// no other. Returns when the socket fails.
+pub(crate) async fn serve(
+    listener: UnixListener,
+    service: Service,
+    max_connections: usize,
+) -> io::Result<Infallible> {
+    let slots = Arc::new(Semaphore::new(max_connections));
     loop {
-        let (stream, _) = listener.accept().await?;
-        tokio::task::spawn_local(serve_connection(stream, service.clone()));
+        let slot = Arc::clone(&slots)
+            .acquire_owned()
+            .await
+            .expect("the semaphore is never closed");
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                let service = service.clone();
+                tokio::task::spawn_local(async move {
+                    serve_connection(stream, service).await;
+                    drop(slot);
+                });
+            }
+            Err(error) if is_transient(&error) => {
+                tracing::warn!("cannot accept a Varlink connection, trying again: {error}");
+                time::sleep(ACCEPT_RETRY).await;
+            }
+            Err(error) => return Err(error),
+        }
     }
+}
+
+/// Returns whether an `accept` error is temporary, for example until other
+/// connections close.
+fn is_transient(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset
+    ) || Errno::from_io_error(error).is_some_and(|errno| {
+        [Errno::MFILE, Errno::NFILE, Errno::NOBUFS, Errno::NOMEM].contains(&errno)
+    })
 }
 
 async fn serve_connection(stream: UnixStream, service: Service) {
@@ -39,7 +83,7 @@ async fn serve_connection(stream: UnixStream, service: Service) {
         Err(error) => Err(error),
     };
     if let Err(error) = result {
-        tracing::debug!(%error, "Varlink connection failed");
+        tracing::debug!("Varlink connection failed: {error}");
     }
 }
 
@@ -141,8 +185,8 @@ impl Service {
         .await
     }
 
-    /// Returns the names of the configured presets. `privacy` is built in and
-    /// not in the list.
+    /// Returns the names of the configured presets. The list does not include
+    /// the built-in `privacy`.
     async fn list_presets(&self) -> Presets {
         Presets {
             presets: self.config.preset_names().map(str::to_owned).collect(),
@@ -282,7 +326,7 @@ mod tests {
         let mut other = connect(&service);
         let _unread = stuck.subscribe_status().await.unwrap();
 
-        // More changes than fill the socket buffer of the stuck subscriber.
+        // The socket buffer of the stuck subscriber cannot hold this many changes.
         let changes = async {
             for change in 0..1000 {
                 other.set_mic_mute(change % 2 == 0).await.unwrap().unwrap();
@@ -292,6 +336,43 @@ mod tests {
         time::timeout(Duration::from_secs(3600), changes)
             .await
             .expect("the other client is not blocked");
+    }
+
+    #[tokio::test(flavor = "local", start_paused = true)]
+    async fn a_connection_over_the_limit_waits_for_a_free_slot() {
+        let service = start("");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control");
+        spawn_local(serve(UnixListener::bind(&path).unwrap(), service, 1));
+        let mut first = zlink::tokio::unix::connect(&path).await.unwrap();
+        first.describe().await.unwrap().unwrap();
+        let second = spawn_local(async move {
+            let mut second = zlink::tokio::unix::connect(&path).await.unwrap();
+            second.describe().await.unwrap().unwrap()
+        });
+
+        time::sleep(Duration::from_secs(60)).await;
+        assert!(!second.is_finished());
+        drop(first);
+
+        time::timeout(Duration::from_secs(60), second)
+            .await
+            .expect("the second client is served")
+            .unwrap();
+    }
+
+    #[test]
+    fn running_out_of_file_descriptors_is_transient() {
+        assert!(is_transient(&io::Error::from_raw_os_error(
+            Errno::MFILE.raw_os_error()
+        )));
+    }
+
+    #[test]
+    fn a_closed_socket_is_not_transient() {
+        assert!(!is_transient(&io::Error::from_raw_os_error(
+            Errno::BADF.raw_os_error()
+        )));
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]

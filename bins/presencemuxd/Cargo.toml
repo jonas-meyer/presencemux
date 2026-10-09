@@ -4,17 +4,41 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Policy daemon of the PresenceMux appliance"
+
+[package.metadata.deb]
+maintainer = "Jonas Meyer-Ohle <19151471+jonas-meyer@users.noreply.github.com>"
+copyright = "2026, Jonas Meyer-Ohle"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+presencemuxd owns the privacy state of the PresenceMux appliance. This state \
+includes the cam and mic planes, the presets, and the leases that the media \
+layer enforces. The daemon serves the Varlink interface \
+io.presencemux.Controller on /run/presencemux/control. Members of the \
+presencemux group can use this socket."""
+section = "video"
+depends = "$auto, systemd (>= 257)"
+maintainer-scripts = "debian/"
+assets = [
+    ["target/release/presencemuxd", "usr/bin/", "755"],
+    ["debian/config.toml", "etc/presencemux/config.toml", "644"],
+]
+systemd-units = { enable = true, start = true }
 
 [dependencies]
+listenfd.workspace = true
 presencemux-api.workspace = true
 presencemux-core.workspace = true
 rustix = { workspace = true, features = ["time"] }
+sd-notify.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "sync", "time"] }
 tokio-stream = { workspace = true, features = ["sync"] }
 toml.workspace = true
 tracing.workspace = true
+tracing-journald.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 zlink = { workspace = true, features = ["service"] }
 
 [dev-dependencies]

@@ -1,0 +1,25 @@
+# /etc/presencemux/config.toml
+
+[slates.still-here]
+text = "Still here"
+
+[slates.brb]
+text = "Be right back"
+
+[slates.away]
+
+[presets.live]
+cam = "live"
+mic = "unmuted"
+
+[presets.still-here]
+cam = { slate = "still-here" }
+mic = "unmuted"
+
+[presets.brb]
+cam = { slate = "brb" }
+mic = "muted"
+
+[presets.away]
+cam = { slate = "away" }
+mic = "muted"

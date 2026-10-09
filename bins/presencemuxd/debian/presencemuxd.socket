@@ -1,0 +1,12 @@
+[Unit]
+Description=PresenceMux control socket
+Documentation=https://github.com/jonas-meyer/presencemux
+
+[Socket]
+ListenStream=/run/presencemux/control
+SocketUser=_presencemux
+SocketGroup=presencemux
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target

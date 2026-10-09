@@ -1,4 +1,4 @@
-//! The status of the daemon in API types.
+//! The status of the controller in API types.
 
 use presencemux_api::{CamStatus, Cause, MicStatus, Status};
 use presencemux_core::Controller;

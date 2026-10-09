@@ -14,7 +14,7 @@ use serde::de::IgnoredAny;
 #[derive(Debug)]
 pub(crate) struct Config {
     presets: BTreeMap<PresetName, Preset>,
-    pub slates: Slates,
+    pub(crate) slates: Slates,
 }
 
 /// A configured preset name. The built-in [`PRESET_PRIVACY`] preset cannot be
@@ -47,7 +47,7 @@ pub(crate) enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("invalid config {}: {source}", path.display())]
+    #[error("invalid configuration {}: {source}", path.display())]
     Invalid { path: PathBuf, source: ParseError },
 }
 
@@ -57,7 +57,7 @@ pub(crate) enum ParseError {
     Toml(#[from] toml::de::Error),
     #[error("preset `{preset}` names the unknown slate `{slate}`")]
     UnknownSlate { preset: PresetName, slate: String },
-    #[error("too many slates")]
+    #[error("more than 65535 slates")]
     TooManySlates,
 }
 
@@ -299,6 +299,11 @@ impl From<MicFile> for MicMute {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn example_config_is_valid() {
+        Config::parse(include_str!("../debian/config.toml")).unwrap();
+    }
 
     #[test]
     fn cam_and_mic_values_resolve_to_core_values() {

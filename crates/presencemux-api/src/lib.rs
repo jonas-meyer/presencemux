@@ -34,7 +34,7 @@ pub struct Status {
 pub struct CamStatus {
     /// The value that the user asked for.
     pub desired: String,
-    /// The value that the cam worker shows.
+    /// The value that the controller grants the cam worker.
     pub effective: String,
     /// Why automation lowered the plane. Null after the user sets the plane.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,13 +46,14 @@ pub struct CamStatus {
 pub struct MicStatus {
     /// The value that the user asked for.
     pub desired: Mute,
-    /// Whether the gate lets audio through.
+    /// Whether the controller lets the gate pass audio.
     pub effective: Permission,
     /// Why automation lowered the plane. Null after the user sets the plane.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cause: Option<Cause>,
 }
 
+/// Whether the user wants the mic muted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
 #[serde(rename_all = "snake_case")]
 #[zlink(rename_all = "snake_case")]
@@ -61,6 +62,7 @@ pub enum Mute {
     Unmuted,
 }
 
+/// Whether the gate may pass audio.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
 #[serde(rename_all = "snake_case")]
 #[zlink(rename_all = "snake_case")]
@@ -80,7 +82,7 @@ pub enum Host {
 }
 
 /// The health of the devices. `degraded` means that a device is missing or
-/// starts.
+/// not ready yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
 #[serde(rename_all = "snake_case")]
 #[zlink(rename_all = "snake_case")]
@@ -115,13 +117,13 @@ pub struct Presets {
 #[derive(Clone, Debug, PartialEq, Eq, zlink::ReplyError, introspect::ReplyError)]
 #[zlink(interface = "io.presencemux.Controller")]
 pub enum Error {
-    /// The preset is not `privacy` and not configured.
+    /// The preset is not `privacy` or a configured preset.
     NoSuchPreset,
     /// The cam value is not `blank`, `live` or a configured slate.
     NoSuchSlate,
     /// The daemon has too many requests to handle. Try again.
     TooManyRequests,
-    /// The daemon is stopping.
+    /// The daemon cannot handle requests at this time.
     NotAvailable,
 }
 

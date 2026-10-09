@@ -15,6 +15,7 @@ use tokio::time::{self, Instant, MissedTickBehavior};
 
 use crate::config::{Config, PresetRef};
 use crate::status::status;
+use crate::systemd;
 
 const CAPACITY: usize = 64;
 const TICK: Duration = Duration::from_millis(200);
@@ -38,7 +39,7 @@ pub(crate) struct Leased<T> {
 #[derive(Debug)]
 pub(crate) struct Request {
     pub(crate) preset: Preset,
-    /// The name for the status. A change of single planes has no name.
+    /// The preset name for the status. `None` for a change of single planes.
     pub(crate) name: Option<PresetRef>,
 }
 
@@ -56,6 +57,10 @@ pub(crate) struct Handle(mpsc::Sender<Message>);
 
 /// The receivers of the leased targets and the status.
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "only the tests use this until the adapters exist")
+)]
 pub(crate) struct Outputs {
     pub(crate) cam: watch::Receiver<Leased<CamPermission>>,
     pub(crate) mic: watch::Receiver<Leased<MicPermission>>,
@@ -70,6 +75,7 @@ pub(crate) struct EventLoop {
     preset: Option<PresetRef>,
     clock: Clock,
     messages: mpsc::Receiver<Message>,
+    watchdog: Option<Duration>,
     cam: watch::Sender<Leased<CamPermission>>,
     mic: watch::Sender<Leased<MicPermission>>,
     status: watch::Sender<Status>,
@@ -78,10 +84,14 @@ pub(crate) struct EventLoop {
 #[derive(Debug)]
 enum Message {
     Request(Request, oneshot::Sender<()>),
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only the tests use this until the adapters exist")
+    )]
     Observation(Observation),
 }
 
-/// A conversion from tokio time to `CLOCK_MONOTONIC`. Tokio time follows
+/// A conversion from Tokio time to `CLOCK_MONOTONIC`. Tokio time follows
 /// `CLOCK_MONOTONIC` on Linux.
 #[derive(Debug)]
 struct Clock {
@@ -90,7 +100,7 @@ struct Clock {
 }
 
 impl Handle {
-    /// Sends a request and waits until the event loop has handled it. It
+    /// Sends a request and waits until the event loop handles it. It
     /// returns [`HandleError::Busy`] at once if the channel is full.
     pub(crate) async fn request(&self, request: Request) -> Result<(), HandleError> {
         let (done, handled) = oneshot::channel();
@@ -104,6 +114,10 @@ impl Handle {
     }
 
     /// Sends an observation. It waits while the channel is full.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "only the tests use this until the adapters exist")
+    )]
     pub(crate) async fn observe(&self, observation: Observation) -> Result<(), HandleError> {
         self.0
             .send(Message::Observation(observation))
@@ -127,6 +141,7 @@ impl EventLoop {
             preset: None,
             clock,
             messages,
+            watchdog: None,
             cam,
             mic,
             status,
@@ -139,11 +154,19 @@ impl EventLoop {
         (event_loop, Handle(sender), outputs)
     }
 
-    /// Runs until every [`Handle`] is dropped.
+    /// Sets how often the tick pings the systemd watchdog. `None` turns the
+    /// ping off.
+    pub(crate) fn with_watchdog(mut self, period: Option<Duration>) -> Self {
+        self.watchdog = period;
+        self
+    }
+
+    /// Runs until no [`Handle`] remains.
     pub(crate) async fn run(mut self) {
         let mut tick = time::interval(TICK);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut last_tick = Instant::now();
+        let mut last_ping: Option<Instant> = None;
         loop {
             tokio::select! {
                 biased;
@@ -154,6 +177,12 @@ impl EventLoop {
                     }
                     last_tick = now;
                     self.renew();
+                    if let Some(period) = self.watchdog
+                        && last_ping.is_none_or(|last| now - last >= period)
+                    {
+                        systemd::watchdog();
+                        last_ping = Some(now);
+                    }
                 }
                 message = self.messages.recv() => match message {
                     Some(message) => self.handle(message),
@@ -166,6 +195,11 @@ impl EventLoop {
     fn handle(&mut self, message: Message) {
         match message {
             Message::Request(Request { preset, name }, done) => {
+                if let Some(name) = &name {
+                    tracing::info!("applying preset {}", name.as_str());
+                } else {
+                    tracing::info!("applying {preset:?}");
+                }
                 self.preset = name;
                 self.apply(Command::Apply(preset).into());
                 self.publish();
@@ -181,6 +215,7 @@ impl EventLoop {
 
     /// Lowers every plane after a tick that came later than the lease length.
     fn lapse(&mut self) {
+        tracing::warn!("late tick, lowering every plane");
         for plane in PlaneId::ALL {
             if self.apply(Observation::LeaseExpired(plane).into()) {
                 self.publish();
@@ -288,8 +323,8 @@ mod tests {
         }
     }
 
-    /// Lets the event loop handle what was sent. Time is paused, and it only
-    /// moves on when every task waits.
+    /// Lets the event loop handle the messages. Paused time advances when every
+    /// task waits.
     async fn settle() {
         time::sleep(Duration::from_millis(10)).await;
     }

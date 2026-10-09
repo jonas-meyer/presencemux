@@ -13,7 +13,9 @@ presencemux-api = { path = "crates/presencemux-api" }
 presencemux-core = { path = "crates/presencemux-core" }
 expect-test = "1.5"
 futures-core = "0.3"
+listenfd = "1.0"
 rustix = "1.1"
+sd-notify = "0.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.27"
@@ -22,6 +24,8 @@ tokio = "1.53"
 tokio-stream = "0.1"
 toml = "1.1"
 tracing = "0.1"
+tracing-journald = "0.3"
+tracing-subscriber = "0.3"
 zlink = { version = "0.7", default-features = false, features = ["tokio", "tracing"] }
 
 [workspace.lints.rust]
@@ -32,7 +36,7 @@ unused_qualifications = "warn"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
-# Too noisy for this workspace, as in uv and Ruff.
+# Too noisy for this workspace.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"

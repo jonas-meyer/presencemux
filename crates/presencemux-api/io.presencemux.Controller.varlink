@@ -3,25 +3,27 @@ interface io.presencemux.Controller
 
 #  The state of the cam plane. Its values are `blank`, `live` or a slate name.
 type CamStatus (#  The value that the user asked for.
-desired: string, #  The value that the cam worker shows.
+desired: string, #  The value that the controller grants the cam worker.
 effective: string, #  Why automation lowered the plane. Null after the user sets the plane.
 cause: ?Cause)
 
 #  The state of the mic plane.
 type MicStatus (#  The value that the user asked for.
-desired: Mute, #  Whether the gate lets audio through.
+desired: Mute, #  Whether the controller lets the gate pass audio.
 effective: Permission, #  Why automation lowered the plane. Null after the user sets the plane.
 cause: ?Cause)
 
+#  Whether the user wants the mic muted.
 type Mute (muted, unmuted)
 
+#  Whether the gate may pass audio.
 type Permission (denied, permitted)
 
 #  The USB connection to the computer on the other side of the gadget.
 type Host (disconnected, suspended, connected)
 
 #  The health of the devices. `degraded` means that a device is missing or
-#  starts.
+#  not ready yet.
 type Health (ready, degraded, fault)
 
 #  The reason why automation lowered a plane.
@@ -47,11 +49,11 @@ method SetCam(cam: string) -> ()
 #  Mutes or unmutes the mic.
 method SetMicMute(muted: bool) -> ()
 
-#  Returns the names of the configured presets. `privacy` is built in and
-#  not in the list.
+#  Returns the names of the configured presets. The list does not include
+#  the built-in `privacy`.
 method ListPresets() -> (presets: []string)
 
-#  The preset is not `privacy` and not configured.
+#  The preset is not `privacy` or a configured preset.
 error NoSuchPreset ()
 
 #  The cam value is not `blank`, `live` or a configured slate.
@@ -60,5 +62,5 @@ error NoSuchSlate ()
 #  The daemon has too many requests to handle. Try again.
 error TooManyRequests ()
 
-#  The daemon is stopping.
+#  The daemon cannot handle requests at this time.
 error NotAvailable ()
