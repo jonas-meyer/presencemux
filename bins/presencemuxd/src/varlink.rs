@@ -58,7 +58,10 @@ pub(crate) async fn serve(
                 });
             }
             Err(error) if is_transient(&error) => {
-                tracing::warn!("cannot accept a Varlink connection, trying again: {error}");
+                tracing::warn!(
+                    "cannot accept a Varlink connection, next try in {} ms: {error}",
+                    ACCEPT_RETRY.as_millis()
+                );
                 time::sleep(ACCEPT_RETRY).await;
             }
             Err(error) => return Err(error),

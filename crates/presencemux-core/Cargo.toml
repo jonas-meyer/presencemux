@@ -9,5 +9,5 @@ publish.workspace = true
 workspace = true
 
 [dev-dependencies]
-insta = "1.49"
+insta.workspace = true
 proptest = "1.11"

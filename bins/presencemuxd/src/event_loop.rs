@@ -196,9 +196,9 @@ impl EventLoop {
         match message {
             Message::Request(Request { preset, name }, done) => {
                 if let Some(name) = &name {
-                    tracing::info!("applying preset {}", name.as_str());
+                    tracing::info!("request: apply preset {}", name.as_str());
                 } else {
-                    tracing::info!("applying {preset:?}");
+                    tracing::info!("request: apply {preset:?}");
                 }
                 self.preset = name;
                 self.apply(Command::Apply(preset).into());
@@ -215,7 +215,7 @@ impl EventLoop {
 
     /// Lowers every plane after a tick that came later than the lease length.
     fn lapse(&mut self) {
-        tracing::warn!("late tick, lowering every plane");
+        tracing::warn!("late tick, every plane goes to its safe value");
         for plane in PlaneId::ALL {
             if self.apply(Observation::LeaseExpired(plane).into()) {
                 self.publish();

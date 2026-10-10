@@ -11,8 +11,10 @@ publish = false
 [workspace.dependencies]
 presencemux-api = { path = "crates/presencemux-api" }
 presencemux-core = { path = "crates/presencemux-core" }
+clap = { version = "4.6", features = ["derive"] }
 expect-test = "1.5"
 futures-core = "0.3"
+insta = "1.49"
 listenfd = "1.0"
 rustix = "1.1"
 sd-notify = "0.5"

@@ -63,7 +63,7 @@ pub(crate) enum ParseError {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum NameError {
-    #[error("`{0}` is a built-in preset and cannot be configured")]
+    #[error("`{0}` is a built-in preset, and the configuration cannot define it")]
     ReservedPreset(String),
     #[error("`{0}` is a cam value and cannot be a slate name")]
     ReservedSlate(String),

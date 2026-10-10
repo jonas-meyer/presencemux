@@ -9,6 +9,9 @@ use zlink::introspect::{self, CustomType, Type};
 
 /// The name of the Varlink interface.
 pub const INTERFACE: &str = "io.presencemux.Controller";
+/// The path of the Varlink socket. The systemd unit `presencemuxd.socket`
+/// creates it.
+pub const SOCKET_PATH: &str = "/run/presencemux/io.presencemux.Controller";
 /// The name of the built-in preset that sets every plane to its safe value.
 pub const PRESET_PRIVACY: &str = "privacy";
 /// The cam value for a blank image.
@@ -144,7 +147,7 @@ pub trait ControllerProxy {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+        f.pad(match self {
             Self::NoSuchPreset => "no such preset",
             Self::NoSuchSlate => "no such slate",
             Self::TooManyRequests => "too many requests",
@@ -154,6 +157,59 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl fmt::Display for Mute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Self::Muted => "muted",
+            Self::Unmuted => "unmuted",
+        })
+    }
+}
+
+impl fmt::Display for Permission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Self::Denied => "denied",
+            Self::Permitted => "permitted",
+        })
+    }
+}
+
+impl fmt::Display for Host {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Self::Disconnected => "disconnected",
+            Self::Suspended => "suspended",
+            Self::Connected => "connected",
+        })
+    }
+}
+
+impl fmt::Display for Health {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Self::Ready => "ready",
+            Self::Degraded => "degraded",
+            Self::Fault => "fault",
+        })
+    }
+}
+
+impl fmt::Display for Cause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Self::CameraFault => "camera_fault",
+            Self::CamWorkerFault => "cam_worker_fault",
+            Self::AudioInterfaceFault => "audio_interface_fault",
+            Self::GateFault => "gate_fault",
+            Self::ControllerStalled => "controller_stalled",
+            Self::HostDisconnected => "host_disconnected",
+            Self::HostSuspended => "host_suspended",
+            Self::HostConnected => "host_connected",
+        })
+    }
+}
 
 impl From<controller::MicMute> for Mute {
     fn from(mute: controller::MicMute) -> Self {
@@ -231,5 +287,32 @@ mod tests {
                 "cause": "host_suspended",
             })
         );
+    }
+
+    #[test]
+    fn display_matches_the_wire_value() {
+        fn check<T: fmt::Display + Serialize>(values: &[T]) {
+            for value in values {
+                assert_eq!(
+                    serde_json::to_value(value).unwrap(),
+                    serde_json::Value::String(value.to_string())
+                );
+            }
+        }
+
+        check(&[Mute::Muted, Mute::Unmuted]);
+        check(&[Permission::Denied, Permission::Permitted]);
+        check(&[Host::Disconnected, Host::Suspended, Host::Connected]);
+        check(&[Health::Ready, Health::Degraded, Health::Fault]);
+        check(&[
+            Cause::CameraFault,
+            Cause::CamWorkerFault,
+            Cause::AudioInterfaceFault,
+            Cause::GateFault,
+            Cause::ControllerStalled,
+            Cause::HostDisconnected,
+            Cause::HostSuspended,
+            Cause::HostConnected,
+        ]);
     }
 }

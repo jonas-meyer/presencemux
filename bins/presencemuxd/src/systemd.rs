@@ -37,3 +37,14 @@ fn notify(state: NotifyState<'_>) {
         tracing::warn!("cannot notify systemd: {error}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn socket_unit_listens_on_the_api_socket_path() {
+        let unit = include_str!("../debian/presencemuxd.socket");
+        let line = format!("ListenStream={}", presencemux_api::SOCKET_PATH);
+
+        assert!(unit.lines().any(|unit_line| unit_line == line), "{unit}");
+    }
+}

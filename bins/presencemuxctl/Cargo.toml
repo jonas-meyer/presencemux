@@ -4,6 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Command-line client for presencemuxd"
+
+[dependencies]
+clap.workspace = true
+presencemux-api.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt"] }
+tokio-stream.workspace = true
+zlink = { workspace = true, features = ["proxy"] }
 
 [lints]
 workspace = true

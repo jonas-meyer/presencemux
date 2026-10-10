@@ -63,8 +63,8 @@ async fn run() -> Result<(), Error> {
     systemd::ready();
     tracing::info!("presencemuxd started in Privacy");
 
-    // The event loop is not spawned. If it ends or panics, the daemon exits,
-    // and systemd starts it again in Privacy.
+    // The event loop runs in this `select!`. If it ends or panics, the daemon
+    // exits, and systemd starts it again in Privacy.
     tokio::select! {
         biased;
         _ = terminate.recv() => {}

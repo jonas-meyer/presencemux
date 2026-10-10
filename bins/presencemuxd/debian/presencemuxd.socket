@@ -3,7 +3,7 @@ Description=PresenceMux control socket
 Documentation=https://github.com/jonas-meyer/presencemux
 
 [Socket]
-ListenStream=/run/presencemux/control
+ListenStream=/run/presencemux/io.presencemux.Controller
 SocketUser=_presencemux
 SocketGroup=presencemux
 SocketMode=0660

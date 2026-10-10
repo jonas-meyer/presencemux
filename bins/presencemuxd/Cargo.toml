@@ -13,14 +13,16 @@ license-file = ["../../LICENSE", "0"]
 extended-description = """\
 presencemuxd owns the privacy state of the PresenceMux appliance. This state \
 includes the cam and mic planes, the presets, and the leases that the media \
-layer enforces. The daemon serves the Varlink interface \
-io.presencemux.Controller on /run/presencemux/control. Members of the \
-presencemux group can use this socket."""
+layer enforces. The daemon serves its Varlink interface on the socket \
+/run/presencemux/io.presencemux.Controller. Members of the presencemux group \
+can use this socket, for example with presencemuxctl, the command-line client \
+in this package."""
 section = "video"
 depends = "$auto, systemd (>= 257)"
 maintainer-scripts = "debian/"
 assets = [
     ["target/release/presencemuxd", "usr/bin/", "755"],
+    ["target/release/presencemuxctl", "usr/bin/", "755"],
     ["debian/config.toml", "etc/presencemux/config.toml", "644"],
 ]
 systemd-units = { enable = true, start = true }
