@@ -1,5 +1,5 @@
 //! Tests of the decoder, the requantization and the encoder, on generated
-//! frames and on saved X100VI frames.
+//! frames and on saved camera frames.
 
 #![expect(
     clippy::cast_possible_truncation,
@@ -50,7 +50,7 @@ impl Shape {
 
 fn shape() -> impl Strategy<Value = Shape> {
     let sampling = prop_oneof![
-        // The X100VI sends 4:2:2.
+        // UVC cameras often send 4:2:2.
         Just(vec![(2, 1), (1, 1), (1, 1)]),
         Just(vec![(2, 2), (1, 1), (1, 1)]),
         Just(vec![(1, 1), (1, 1), (1, 1)]),
@@ -304,7 +304,7 @@ proptest! {
 }
 
 /// Returns 4:2:2 blocks for a frame of `shape`, dense with large values, like
-/// X100VI frames at full quality.
+/// camera frames at full quality.
 fn dense_blocks(shape: &Shape) -> Vec<[i16; 64]> {
     let mut random = XorShift(0x9E37_79B9_7F4A_7C15);
     (0..shape.blocks())
@@ -558,11 +558,10 @@ fn quality_80_gives_the_tables_of_libjpeg() {
 }
 
 /// Checks the decoder against the sum of the absolute coefficients that
-/// libjpeg-turbo gives for the 150 saved X100VI frames. `examples/bench.rs`
-/// checks the same sum.
+/// libjpeg-turbo gives for the 150 saved camera frames.
 #[test]
-#[ignore = "needs the saved X100VI frames in the directory PRESENCEMUX_JPEG_FRAMES"]
-fn x100vi_frames_give_the_coefficients_of_libjpeg() {
+#[ignore = "needs the saved camera frames in the directory PRESENCEMUX_JPEG_FRAMES"]
+fn saved_frames_give_the_coefficients_of_libjpeg() {
     let dir = std::env::var("PRESENCEMUX_JPEG_FRAMES").expect("PRESENCEMUX_JPEG_FRAMES");
     let frames: Vec<Vec<u8>> = (0..150)
         .map(|i| std::fs::read(format!("{dir}/f{i:03}.jpg")).expect("frame"))

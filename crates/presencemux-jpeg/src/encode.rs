@@ -105,8 +105,8 @@ impl fmt::Debug for Encoder {
 }
 
 impl Encoder {
-    /// Creates an encoder with the libjpeg tables of `quality`. The quality is
-    /// limited to the range 1 to 100.
+    /// Creates an encoder with the libjpeg tables of `quality`. Clamps the
+    /// quality to the range 1 to 100.
     pub fn new(quality: u8) -> Self {
         let quality = quality.clamp(1, 100);
         Self {
@@ -130,10 +130,14 @@ impl Encoder {
         self.quality
     }
 
-    /// Changes the quality. The quality is limited to the range 1 to 100.
+    /// Changes the quality. Clamps the quality to the range 1 to 100. The next
+    /// `prepare` builds the requantization again.
     pub fn set_quality(&mut self, quality: u8) {
-        if quality.clamp(1, 100) != self.quality {
-            *self = Self::new(quality);
+        let quality = quality.clamp(1, 100);
+        if quality != self.quality {
+            self.quality = quality;
+            self.target = requant::tables(quality);
+            self.sources.clear();
         }
     }
 

@@ -38,8 +38,8 @@ impl Node {
     }
 }
 
-/// One appearance of the camera node. A camera that goes away and comes back
-/// at the same path gets a new generation.
+/// One appearance of the camera node. A camera that udev removes and adds
+/// again at the same path gets a new generation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CameraNode {
     pub(crate) path: PathBuf,
@@ -301,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn camera_that_comes_back_at_the_same_path_is_a_new_camera() {
+    fn camera_removed_and_added_at_the_same_path_is_a_new_camera() {
         let path = Path::new("/dev/video1");
         let mut nodes = Nodes::default();
         nodes.set(Node::Camera, Some(path));

@@ -1,7 +1,7 @@
-//! Benchmarks of the requantization of the saved X100VI frames.
+//! Benchmarks of the requantization of saved camera frames.
 //!
 //! ```sh
-//! PRESENCEMUX_JPEG_FRAMES=~/gadget-test/fuji-frames cargo bench -p presencemux-jpeg
+//! PRESENCEMUX_JPEG_FRAMES=DIR cargo bench -p presencemux-jpeg
 //! ```
 //!
 //! Each step runs with 1 to 4 parts, in turn on one thread (`sequential`) and
@@ -73,7 +73,7 @@ fn mode(threaded: bool) -> &'static str {
 
 fn benchmarks(c: &mut Criterion) {
     let Some(frames) = frames() else {
-        eprintln!("set PRESENCEMUX_JPEG_FRAMES to the directory of the saved X100VI frames");
+        eprintln!("set PRESENCEMUX_JPEG_FRAMES to the directory of the saved camera frames");
         return;
     };
     let mut tables = Tables::new();

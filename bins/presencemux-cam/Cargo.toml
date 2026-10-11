@@ -25,6 +25,7 @@ assets = [
 systemd-units = { enable = true, start = true }
 
 [dependencies]
+presencemux-jpeg.workspace = true
 rustix = { workspace = true, features = ["event", "fs", "mm", "time"] }
 sd-notify = { workspace = true, features = ["fdstore"] }
 thiserror.workspace = true

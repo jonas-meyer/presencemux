@@ -757,6 +757,7 @@ name = "presencemux-cam"
 version = "0.1.0"
 dependencies = [
  "insta",
+ "presencemux-jpeg",
  "proptest",
  "rustix",
  "sd-notify",

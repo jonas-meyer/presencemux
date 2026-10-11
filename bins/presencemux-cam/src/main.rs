@@ -3,6 +3,14 @@
 
 mod capture;
 mod discovery;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only the tests use the requantizer until frame choice and the lease exist"
+    )
+)]
+mod live;
 mod output;
 mod systemd;
 mod uvc;
