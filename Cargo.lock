@@ -599,6 +599,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "presencemux-gadget"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "insta",
+ "thiserror",
+]
+
+[[package]]
 name = "presencemuxctl"
 version = "0.1.0"
 dependencies = [

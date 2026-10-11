@@ -1,0 +1,41 @@
+[Unit]
+Description=PresenceMux USB gadget
+Documentation=https://github.com/jonas-meyer/presencemux
+Requires=sys-kernel-config.mount
+Wants=modprobe@libcomposite.service
+After=sys-kernel-config.mount modprobe@libcomposite.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/presencemux-gadget up
+ExecStop=/usr/bin/presencemux-gadget down
+
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/sys/kernel/config
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictAddressFamilies=none
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=usb-gadget.target

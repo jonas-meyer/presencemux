@@ -1,0 +1,33 @@
+[package]
+name = "presencemux-gadget"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "USB gadget setup of the PresenceMux appliance"
+
+[package.metadata.deb]
+maintainer = "Jonas Meyer-Ohle <19151471+jonas-meyer@users.noreply.github.com>"
+copyright = "2026, Jonas Meyer-Ohle"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+presencemux-gadget creates the USB gadget of the PresenceMux appliance in \
+configfs: the camera Studio Camera (UVC), the microphone Studio Microphone and \
+the speakers Studio Audio (UAC2). Its unit starts when a UDC appears. Put \
+dtoverlay=dwc2,dr_mode=peripheral under [pi5] in /boot/firmware/config.txt."""
+section = "video"
+depends = "$auto, systemd (>= 257)"
+conflicts = "rpi-usb-gadget"
+maintainer-scripts = "debian/"
+assets = [["target/release/presencemux-gadget", "usr/bin/", "755"]]
+systemd-units = { enable = true, start = true, restart-after-upgrade = false, stop-on-upgrade = false }
+
+[dependencies]
+clap.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+
+[lints]
+workspace = true
