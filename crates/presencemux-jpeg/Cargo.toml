@@ -1,0 +1,25 @@
+[package]
+name = "presencemux-jpeg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+memchr.workspace = true
+thiserror.workspace = true
+zerocopy.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "requantize"
+harness = false
+
+[lints]
+workspace = true

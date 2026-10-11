@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c7701fafb77d97ac3639e6b7f312c2bf5d23cc17649d1f7f047648865494e39d # shrinks to source = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], target = [3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 4, 118, 127, 108, 214, 254, 218, 62], values = [1853, 137, 539, 428, 960, -42, -1199, 352, 999, 1965, 776, -1048, -874, 50, 1410, -614, -249, 485, -457, 863, 1742, -994, -505, -1373, -313, 1133, 744, -635, 1266, -1773, 198, -1081], dc_offset = 750
