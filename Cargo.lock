@@ -580,6 +580,13 @@ version = "0.1.0"
 dependencies = [
  "insta",
  "proptest",
+ "rustix",
+ "sd-notify",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-journald",
+ "tracing-subscriber",
  "zerocopy",
 ]
 
@@ -777,6 +784,16 @@ name = "sd-notify"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e4ef7359e694bfaf1dd27a30f9d760b54c00dfae9f19bd0c05a39bc9128fe76"
+dependencies = [
+ "libc",
+ "sendfd",
+]
+
+[[package]]
+name = "sendfd"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8fa82bbd0ce6c16273ec6c310d3973f8b8f8665ecfe0ca02a49b3ea61b2418c"
 dependencies = [
  "libc",
 ]

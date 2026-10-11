@@ -102,6 +102,6 @@ fn init_logging() {
         .with(filter)
         .init();
     if let Some(error) = journald_error {
-        tracing::warn!("cannot log to the journal, using stderr: {error}");
+        tracing::warn!("cannot log to the journal, logs go to stderr: {error}");
     }
 }

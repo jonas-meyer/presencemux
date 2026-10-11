@@ -1,6 +1,6 @@
 //! The UVC protocol of the gadget function, without I/O.
 //!
-//! The kernel sends each setup request of the laptop as a V4L2 event and waits
+//! The kernel sends each setup request of the host as a V4L2 event and waits
 //! for one answer. `docs/cam.md` describes the protocol.
 
 use zerocopy::little_endian::{U16, U32};
@@ -112,7 +112,7 @@ impl Input {
     }
 }
 
-/// A setup request of the laptop (`struct usb_ctrlrequest`).
+/// A setup request of the host (`struct usb_ctrlrequest`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Setup {
     pub(crate) request_type: u8,
@@ -141,7 +141,7 @@ impl Setup {
 }
 
 /// The data stage of a setup request (`struct uvc_request_data`). It holds the
-/// data from the laptop or the data of an answer.
+/// data from the host or the data of an answer.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RequestData {
     len: u8,
@@ -213,7 +213,7 @@ pub(crate) enum Action {
 /// The values that the probe and commit answers need.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Limits {
-    /// `sizeimage` from `VIDIOC_S_FMT`.
+    /// The `sizeimage` of the current format.
     pub(crate) max_frame_size: u32,
     /// `streaming_maxpacket` of the gadget.
     pub(crate) max_payload: u32,
@@ -313,6 +313,7 @@ impl Uvc {
         }
     }
 
+    /// Updates the state for an event and returns the action for it.
     #[must_use]
     pub(crate) fn handle(&mut self, input: Input) -> Option<Action> {
         match input {
@@ -638,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn out_of_range_probe_from_the_laptop_reads_as_the_only_format() {
+    fn out_of_range_probe_from_the_host_reads_as_the_only_format() {
         let mut uvc = Uvc::new(LIMITS);
         let _ = uvc.handle(setup(SET_CUR, VS_PROBE, STREAMING, 34));
         let _ = uvc.handle(data(&[0xff; 34]));

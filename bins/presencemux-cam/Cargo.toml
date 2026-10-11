@@ -7,6 +7,13 @@ publish.workspace = true
 description = "Cam worker of the PresenceMux appliance"
 
 [dependencies]
+rustix = { workspace = true, features = ["fs", "mm", "time"] }
+sd-notify = { workspace = true, features = ["fdstore"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "time"] }
+tracing.workspace = true
+tracing-journald.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 zerocopy.workspace = true
 
 [dev-dependencies]
