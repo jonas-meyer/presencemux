@@ -2,6 +2,14 @@
 //! host through the UVC gadget function.
 
 mod capture;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only the tests use frame choice until the lease exists"
+    )
+)]
+mod choice;
 mod discovery;
 #[cfg_attr(
     not(test),

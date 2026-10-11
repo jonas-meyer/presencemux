@@ -1,0 +1,25 @@
+---
+source: bins/presencemux-cam/src/choice.rs
+expression: table
+---
+latch before | event | result | latch after | shown with a fresh frame
+none | live lease, same grant | Ok(()) | none | Live
+none | live lease, newer epoch | Ok(()) | none | Live
+none | live lease, newer session | Ok(()) | none | Live
+none | expiry | Some(Expired) | Expired at epoch 1 | Blank
+none | no frame for 500 ms | Some(Stalled) | Stalled at epoch 1 | Blank
+Started at epoch 3 | live lease, same grant | Ok(()) | Started at epoch 3 | Blank
+Started at epoch 3 | live lease, newer epoch | Ok(()) | none | Live
+Started at epoch 3 | live lease, newer session | Ok(()) | none | Live
+Started at epoch 3 | expiry | Some(Expired) | Expired at epoch 3 | Blank
+Started at epoch 3 | no frame for 500 ms | None | Started at epoch 3 | Blank
+Stalled at epoch 1 | live lease, same grant | Ok(()) | Stalled at epoch 1 | Blank
+Stalled at epoch 1 | live lease, newer epoch | Ok(()) | none | Live
+Stalled at epoch 1 | live lease, newer session | Ok(()) | none | Live
+Stalled at epoch 1 | expiry | Some(Expired) | Expired at epoch 1 | Blank
+Stalled at epoch 1 | no frame for 500 ms | None | Stalled at epoch 1 | Blank
+Expired at epoch 1 | live lease, same grant | Ok(()) | Expired at epoch 1 | Blank
+Expired at epoch 1 | live lease, newer epoch | Ok(()) | none | Live
+Expired at epoch 1 | live lease, newer session | Ok(()) | none | Live
+Expired at epoch 1 | expiry | None | Expired at epoch 1 | Blank
+Expired at epoch 1 | no frame for 500 ms | None | Expired at epoch 1 | Blank
