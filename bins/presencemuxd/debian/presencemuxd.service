@@ -2,6 +2,7 @@
 Description=PresenceMux policy daemon
 Documentation=https://github.com/jonas-meyer/presencemux
 Requires=presencemuxd.socket
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify
@@ -11,8 +12,6 @@ User=_presencemux
 Group=_presencemux
 Restart=always
 RestartSec=1s
-RestartSteps=3
-RestartMaxDelaySec=5s
 WatchdogSec=5s
 LimitNOFILE=4096
 
