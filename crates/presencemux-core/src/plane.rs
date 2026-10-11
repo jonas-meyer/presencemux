@@ -52,6 +52,10 @@ pub struct Epoch(u32);
 impl Epoch {
     pub const BOOT: Self = Self(0);
 
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
     pub const fn get(self) -> u32 {
         self.0
     }
@@ -82,6 +86,8 @@ pub struct PlaneState<P: Plane> {
     pub(crate) observed: P::Observed,
     pub(crate) target: P::Target,
     pub(crate) cause: Option<Cause>,
+    /// The epoch of the last command that set this plane.
+    pub(crate) epoch: Epoch,
 }
 
 impl<P: Plane> PlaneState<P> {
@@ -91,6 +97,7 @@ impl<P: Plane> PlaneState<P> {
             observed: P::Observed::default(),
             target: P::SAFE,
             cause: None,
+            epoch: Epoch::BOOT,
         }
     }
 
@@ -122,8 +129,9 @@ impl<P: Plane> PlaneState<P> {
         }
     }
 
-    pub(crate) fn set(&mut self, desired: P::Desired) {
+    pub(crate) fn set(&mut self, desired: P::Desired, epoch: Epoch) {
         self.desired = desired;
+        self.epoch = epoch;
         self.cause = None;
     }
 

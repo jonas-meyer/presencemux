@@ -38,8 +38,9 @@ pub enum Command {
 pub enum Observation {
     Device(Device, DeviceStatus),
     /// A lease of this plane lapsed. The media layer or the event loop reports
-    /// it.
-    LeaseExpired(PlaneId),
+    /// it, with the epoch of the lease. A lapse with an epoch older than the
+    /// last command for this plane has no effect.
+    LeaseExpired(PlaneId, Epoch),
     Host(HostStatus),
 }
 
@@ -95,18 +96,20 @@ impl Controller {
             Event::Observation(Observation::Device(device, status)) => {
                 self.observe(device, status);
             }
-            Event::Observation(Observation::LeaseExpired(plane)) => {
-                self.lower(plane, Cause::ControllerStalled);
+            Event::Observation(Observation::LeaseExpired(plane, epoch)) => {
+                if epoch >= self.granted(plane) {
+                    self.lower(plane, Cause::ControllerStalled);
+                }
             }
             Event::Observation(Observation::Host(status)) => self.observe_host(status),
         }
         let cam = self.cam.update(Granted {
             permission: policy::cam(&self.cam),
-            epoch: self.epoch,
+            epoch: self.cam.epoch,
         });
         let mic = self.mic.update(Granted {
             permission: policy::mic(&self.mic),
-            epoch: self.epoch,
+            epoch: self.mic.epoch,
         });
         Effects {
             cam,
@@ -158,10 +161,18 @@ impl Controller {
         let Preset { cam, mic } = preset;
         self.epoch = self.epoch.next();
         if let Some(cam) = cam {
-            self.cam.set(cam);
+            self.cam.set(cam, self.epoch);
         }
         if let Some(mic) = mic {
-            self.mic.set(mic);
+            self.mic.set(mic, self.epoch);
+        }
+    }
+
+    /// Returns the epoch of the last command that set the plane.
+    pub fn granted(&self, plane: PlaneId) -> Epoch {
+        match plane {
+            PlaneId::Cam => self.cam.epoch,
+            PlaneId::Mic => self.mic.epoch,
         }
     }
 

@@ -217,7 +217,8 @@ impl EventLoop {
     fn lapse(&mut self) {
         tracing::warn!("late tick, every plane goes to its safe value");
         for plane in PlaneId::ALL {
-            if self.apply(Observation::LeaseExpired(plane).into()) {
+            let epoch = self.controller.granted(plane);
+            if self.apply(Observation::LeaseExpired(plane, epoch).into()) {
                 self.publish();
             }
         }

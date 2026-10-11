@@ -1,6 +1,6 @@
 use presencemux_core::{
-    CamPermission, Cause, Command, Controller, Device, DeviceStatus, Event, HostStatus, MicMute,
-    Observation, OnAir, PlaneId, PlaneSummary, Preset, SlateId,
+    CamPermission, Cause, Command, Controller, Device, DeviceStatus, Epoch, Event, HostStatus,
+    MicMute, Observation, OnAir, PlaneId, PlaneSummary, Preset, SlateId,
 };
 use proptest::prelude::*;
 use proptest::sample::select;
@@ -62,6 +62,10 @@ pub(crate) fn plane() -> impl Strategy<Value = PlaneId> {
     select(&PlaneId::ALL[..])
 }
 
+fn epoch() -> impl Strategy<Value = Epoch> {
+    (0..24_u32).prop_map(Epoch::new)
+}
+
 fn cam() -> impl Strategy<Value = CamPermission> {
     prop_oneof![
         Just(CamPermission::Blank),
@@ -80,10 +84,40 @@ pub(crate) fn preset() -> impl Strategy<Value = Preset> {
         .prop_map(|(cam, mic)| Preset { cam, mic })
 }
 
+/// A preset that sets the plane.
+pub(crate) fn preset_setting(plane: PlaneId) -> BoxedStrategy<Preset> {
+    match plane {
+        PlaneId::Cam => (cam(), proptest::option::of(mic()))
+            .prop_map(|(cam, mic)| Preset {
+                cam: Some(cam),
+                mic,
+            })
+            .boxed(),
+        PlaneId::Mic => (proptest::option::of(cam()), mic())
+            .prop_map(|(cam, mic)| Preset {
+                cam,
+                mic: Some(mic),
+            })
+            .boxed(),
+    }
+}
+
+/// A preset that does not set the plane.
+pub(crate) fn preset_without(plane: PlaneId) -> BoxedStrategy<Preset> {
+    match plane {
+        PlaneId::Cam => proptest::option::of(mic())
+            .prop_map(|mic| Preset { cam: None, mic })
+            .boxed(),
+        PlaneId::Mic => proptest::option::of(cam())
+            .prop_map(|cam| Preset { cam, mic: None })
+            .boxed(),
+    }
+}
+
 pub(crate) fn observation() -> impl Strategy<Value = Observation> {
     prop_oneof![
         4 => (device(), device_status()).prop_map(|(d, s)| Observation::Device(d, s)),
-        1 => plane().prop_map(Observation::LeaseExpired),
+        1 => (plane(), epoch()).prop_map(|(p, e)| Observation::LeaseExpired(p, e)),
         1 => host_status().prop_map(Observation::Host),
     ]
 }
