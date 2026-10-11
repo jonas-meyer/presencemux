@@ -16,6 +16,7 @@ expect-test = "1.5"
 futures-core = "0.3"
 insta = "1.49"
 listenfd = "1.0"
+proptest = "1.11"
 rustix = "1.1"
 sd-notify = "0.5"
 serde = { version = "1.0", features = ["derive"] }
@@ -28,6 +29,7 @@ toml = "1.1"
 tracing = "0.1"
 tracing-journald = "0.3"
 tracing-subscriber = "0.3"
+zerocopy = { version = "0.8", features = ["derive"] }
 zlink = { version = "0.7", default-features = false, features = ["tokio", "tracing"] }
 
 [workspace.lints.rust]

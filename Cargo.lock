@@ -575,6 +575,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "presencemux-cam"
+version = "0.1.0"
+dependencies = [
+ "insta",
+ "proptest",
+ "zerocopy",
+]
+
+[[package]]
 name = "presencemux-core"
 version = "0.1.0"
 dependencies = [
