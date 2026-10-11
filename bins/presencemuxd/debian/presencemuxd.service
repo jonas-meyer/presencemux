@@ -36,7 +36,11 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
 SystemCallErrorNumber=EPERM
+RemoveIPC=yes
+PrivateIPC=yes
+IPAddressDeny=any
 UMask=0077
 
 [Install]
