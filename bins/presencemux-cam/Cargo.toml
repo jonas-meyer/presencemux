@@ -18,17 +18,21 @@ fd store. The host then stays connected when the worker restarts."""
 section = "video"
 depends = "$auto, systemd (>= 257), presencemux-gadget"
 maintainer-scripts = "debian/"
-assets = [["target/release/presencemux-cam", "usr/bin/", "755"]]
+assets = [
+    ["target/release/presencemux-cam", "usr/bin/", "755"],
+    ["debian/70-presencemux-cam.rules", "usr/lib/udev/rules.d/", "644"],
+]
 systemd-units = { enable = true, start = true }
 
 [dependencies]
-rustix = { workspace = true, features = ["fs", "mm", "time"] }
+rustix = { workspace = true, features = ["event", "fs", "mm", "time"] }
 sd-notify = { workspace = true, features = ["fdstore"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "time"] }
 tracing.workspace = true
 tracing-journald.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+udev.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]

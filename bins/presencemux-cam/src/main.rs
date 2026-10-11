@@ -1,6 +1,8 @@
 //! The cam worker of PresenceMux. It sends live video, a slate or blank to the
 //! host through the UVC gadget function.
 
+mod capture;
+mod discovery;
 mod output;
 mod systemd;
 mod uvc;
@@ -8,7 +10,7 @@ mod v4l2;
 
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -21,20 +23,22 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 
+use crate::capture::{CameraStatus, Capture};
+use crate::discovery::Discovery;
 use crate::output::{Frame, FrameId, Output};
 use crate::systemd::Watchdog;
 use crate::uvc::{Action, Input, Limits, Uvc};
+use crate::v4l2::Queue;
 
-/// The name of the UVC function in the configfs gadget.
-const UVC_FUNCTION: &str = "uvc.0";
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
 /// `streaming_maxpacket` of the gadget.
 const MAX_PAYLOAD: u32 = 2048;
 /// The time between two frames at 30 fps.
 const FRAME_PERIOD: Duration = Duration::from_nanos(33_333_333);
-/// The interval between two searches for the gadget node.
-const SEARCH_PERIOD: Duration = Duration::from_millis(200);
+/// The interval between two watchdog pings while the worker waits for the
+/// gadget node.
+const PING_PERIOD: Duration = Duration::from_millis(200);
 
 const BLANK: Frame<'static> = Frame {
     id: FrameId(0),
@@ -45,8 +49,12 @@ const BLANK: Frame<'static> = Frame {
 enum Error {
     #[error("cannot read the fds from systemd: {0}")]
     FdStore(io::Error),
-    #[error("cannot search for the gadget node: {0}")]
-    Search(io::Error),
+    #[error("cannot watch the V4L2 nodes with udev: {0}")]
+    Discovery(io::Error),
+    #[error("cannot start the capture thread: {0}")]
+    Capture(io::Error),
+    #[error("the capture thread has ended")]
+    CaptureEnded,
     #[error("cannot open the gadget node {}: {source}", path.display())]
     Open { path: PathBuf, source: io::Error },
     #[error("cannot prepare the gadget node: {0}")]
@@ -76,6 +84,9 @@ async fn run() -> Result<(), Error> {
     let mut interrupt = signal(SignalKind::interrupt()).map_err(Error::Signal)?;
     systemd::ready();
     let mut watchdog = Watchdog::new();
+    let mut discovery = Discovery::new().map_err(Error::Discovery)?;
+    let capture = Capture::spawn().map_err(Error::Capture)?;
+    capture.set_node(discovery.nodes().camera());
 
     let mut fds = systemd::passed_fds().map_err(Error::FdStore)?;
     let stored = fds.remove(systemd::UVC_FD_NAME);
@@ -87,7 +98,7 @@ async fn run() -> Result<(), Error> {
             biased;
             _ = terminate.recv() => None,
             _ = interrupt.recv() => None,
-            node = open_node(&mut watchdog) => Some(node?),
+            node = open_node(&mut discovery, &capture, &mut watchdog) => Some(node?),
         };
         let Some(node) = opened else {
             systemd::stopping();
@@ -115,10 +126,12 @@ async fn run() -> Result<(), Error> {
         output,
         start_pending: false,
         frame_error: None,
+        camera: capture.status(v4l2::monotonic_now()),
     };
     tracing::info!(
-        "presencemux-cam started, adopted: {adopted}, streaming: {}",
-        worker.output.is_some()
+        "presencemux-cam started, adopted: {adopted}, streaming: {}, camera: {}",
+        worker.output.is_some(),
+        worker.camera
     );
 
     // Events can wait in the stored gadget node from before a restart.
@@ -136,8 +149,16 @@ async fn run() -> Result<(), Error> {
                 worker.handle_events(node.get_ref().as_fd()).map_err(Error::Events)?;
                 guard.clear_ready_matching(Ready::PRIORITY);
             }
+            changed = discovery.changed() => {
+                changed.map_err(Error::Discovery)?;
+                capture.set_node(discovery.nodes().camera());
+            }
             _ = frames.tick() => {
+                if capture.has_ended() {
+                    return Err(Error::CaptureEnded);
+                }
                 worker.send_frame(node.get_ref().as_fd());
+                worker.check_camera(&capture);
                 watchdog.ping();
             }
         }
@@ -158,6 +179,8 @@ struct Worker {
     /// The last error of the stream. The worker logs an error only when it
     /// differs from this one.
     frame_error: Option<String>,
+    /// The last status of the camera.
+    camera: CameraStatus,
 }
 
 impl Worker {
@@ -237,6 +260,15 @@ impl Worker {
         }
     }
 
+    /// Updates the status of the camera, and logs a change.
+    fn check_camera(&mut self, capture: &Capture) {
+        let status = capture.status(v4l2::monotonic_now());
+        if status != self.camera {
+            tracing::info!("camera: {status}");
+            self.camera = status;
+        }
+    }
+
     /// Logs an error of the stream, unless it is the same as the last one.
     fn log_error(&mut self, message: &str) {
         if self.frame_error.as_deref() != Some(message) {
@@ -246,49 +278,49 @@ impl Worker {
     }
 }
 
-/// Opens the gadget node. Waits until the gadget node exists.
-async fn open_node(watchdog: &mut Watchdog) -> Result<OwnedFd, Error> {
+/// Waits until the gadget node exists, and opens it. While it waits, it passes
+/// changes of the camera node to the capture thread.
+async fn open_node(
+    discovery: &mut Discovery,
+    capture: &Capture,
+    watchdog: &mut Watchdog,
+) -> Result<OwnedFd, Error> {
     let mut logged = false;
+    let mut ping = tokio::time::interval(PING_PERIOD);
     let path = loop {
-        if let Some(path) = find_node().map_err(Error::Search)? {
-            break path;
+        if let Some(path) = discovery.nodes().gadget() {
+            break path.to_owned();
         }
         if !logged {
-            tracing::info!("the worker waits for the gadget node of {UVC_FUNCTION}");
+            tracing::info!("the worker waits for the gadget node");
             logged = true;
         }
-        watchdog.ping();
-        tokio::time::sleep(SEARCH_PERIOD).await;
+        tokio::select! {
+            changed = discovery.changed() => {
+                changed.map_err(Error::Discovery)?;
+                capture.set_node(discovery.nodes().camera());
+            }
+            _ = ping.tick() => watchdog.ping(),
+        }
     };
-    let flags = OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    rustix::fs::open(&path, flags, Mode::empty()).map_err(|error| Error::Open {
-        path,
-        source: error.into(),
-    })
+    open(&path)
 }
 
-/// Returns the path of the gadget node, if it exists.
-fn find_node() -> io::Result<Option<PathBuf>> {
-    let entries = match std::fs::read_dir("/sys/class/video4linux") {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        entries => entries?,
-    };
-    for entry in entries {
-        let entry = entry?;
-        let function = std::fs::read_to_string(entry.path().join("function_name"));
-        if function.is_ok_and(|name| name.trim_end() == UVC_FUNCTION) {
-            return Ok(Some(PathBuf::from("/dev").join(entry.file_name())));
-        }
-    }
-    Ok(None)
+/// Opens the gadget node at `path`.
+fn open(path: &Path) -> Result<OwnedFd, Error> {
+    let flags = OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    rustix::fs::open(path, flags, Mode::empty()).map_err(|error| Error::Open {
+        path: path.to_owned(),
+        source: error.into(),
+    })
 }
 
 /// Checks the gadget node, sets the format and the frame time, and subscribes
 /// to the UVC events. The host enumerates the gadget after this call.
 fn prepare_node(fd: BorrowedFd<'_>) -> io::Result<()> {
     v4l2::check_gadget(fd)?;
-    v4l2::set_format(fd, WIDTH, HEIGHT)?;
-    v4l2::set_frame_time(fd, 1, 60)?;
+    v4l2::set_format(fd, Queue::Output, WIDTH, HEIGHT)?;
+    v4l2::set_frame_time(fd, Queue::Output, 1, 60)?;
     for kind in [
         uvc::EVENT_DISCONNECT,
         uvc::EVENT_CONNECT,

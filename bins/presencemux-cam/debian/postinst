@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    # Applies the new udev rule to the V4L2 nodes that exist.
+    udevadm control --reload || true
+    udevadm trigger --subsystem-match=video4linux --action=change || true
+    udevadm settle || true
+fi
+
+#DEBHELPER#

@@ -1,0 +1,21 @@
+# Tags the V4L2 nodes of presencemux-cam. The worker uses only tagged nodes.
+#
+# To use another camera, copy this file to /etc/udev/rules.d/ and change the
+# copy. The copy replaces this file. Then apply it to the connected devices:
+#   udevadm control --reload
+#   udevadm trigger --subsystem-match=video4linux --action=change
+# Check a node with `udevadm info /dev/videoN` (the CURRENT_TAGS line).
+
+ACTION=="remove", GOTO="presencemux_cam_end"
+SUBSYSTEM!="video4linux", GOTO="presencemux_cam_end"
+
+# The output node of the UVC function that presencemux-gadget creates.
+ATTR{function_name}=="uvc.0", TAG+="presencemux-gadget"
+
+# The capture node of the Fujifilm X100VI. Its metadata node has the index 1.
+# 60-persistent-v4l.rules sets the ID_ properties.
+ENV{ID_VENDOR_ID}=="04cb", ENV{ID_MODEL_ID}=="0304", \
+  ENV{ID_V4L_CAPABILITIES}==":capture:", ATTR{index}=="0", \
+  TAG+="presencemux-camera"
+
+LABEL="presencemux_cam_end"

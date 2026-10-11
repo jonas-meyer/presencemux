@@ -1,15 +1,16 @@
 //! The V4L2 and UVC gadget structs of the kernel, and the ioctls on the gadget
-//! node.
+//! node and the capture node.
 //!
 //! The structs follow `linux/videodev2.h` and `linux/usb/g_uvc.h` of kernel
 //! 6.18 on aarch64. Each padding byte is a named field.
 
-#![expect(unsafe_code, reason = "ioctl and mmap on the gadget node")]
+#![expect(unsafe_code, reason = "ioctl and mmap on the V4L2 nodes")]
 
 use std::ffi::CStr;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::ptr::NonNull;
+use std::time::Duration;
 
 use rustix::io::Errno;
 use rustix::ioctl::{Getter, Opcode, Setter, Updater, ioctl, opcode};
@@ -17,10 +18,10 @@ use rustix::mm::{MapFlags, ProtFlags, mmap, munmap};
 use rustix::time::{ClockId, clock_gettime};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
 
-const BUF_TYPE_VIDEO_OUTPUT: u32 = 2;
 const MEMORY_MMAP: u32 = 1;
 const PIX_FMT_MJPEG: u32 = u32::from_le_bytes(*b"MJPG");
 const FIELD_NONE: u32 = 1;
+const CAP_VIDEO_CAPTURE: u32 = 0x0000_0001;
 const CAP_VIDEO_OUTPUT: u32 = 0x0000_0002;
 const CAP_STREAMING: u32 = 0x0400_0000;
 
@@ -28,8 +29,30 @@ const CAP_STREAMING: u32 = 0x0400_0000;
 pub(crate) const BUF_FLAG_QUEUED: u32 = 0x0002;
 /// The buffer flag for a buffer that the kernel has sent.
 pub(crate) const BUF_FLAG_DONE: u32 = 0x0004;
+/// The buffer flag for a frame with a transfer error.
+pub(crate) const BUF_FLAG_ERROR: u32 = 0x0040;
+const BUF_FLAG_TIMESTAMP_MASK: u32 = 0xe000;
+const BUF_FLAG_TIMESTAMP_MONOTONIC: u32 = 0x2000;
 /// The largest number of buffers of a V4L2 queue, `VIDEO_MAX_FRAME`.
 pub(crate) const MAX_BUFFERS: u32 = 64;
+
+/// The buffer queue of a node, `enum v4l2_buf_type`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Queue {
+    /// `V4L2_BUF_TYPE_VIDEO_CAPTURE`.
+    Capture,
+    /// `V4L2_BUF_TYPE_VIDEO_OUTPUT`.
+    Output,
+}
+
+impl Queue {
+    fn kind(self) -> u32 {
+        match self {
+            Self::Capture => 1,
+            Self::Output => 2,
+        }
+    }
+}
 
 /// `struct v4l2_capability`.
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
@@ -65,13 +88,14 @@ struct Format {
     rest: [u8; 152],
 }
 
-/// `struct v4l2_streamparm` with `struct v4l2_outputparm`.
+/// `struct v4l2_streamparm` with `struct v4l2_outputparm` or
+/// `struct v4l2_captureparm`. Both start with the same fields.
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C)]
 struct StreamParm {
     kind: u32,
     capability: u32,
-    output_mode: u32,
+    mode: u32,
     numerator: u32,
     denominator: u32,
     rest: [u8; 184],
@@ -206,28 +230,46 @@ const _: () = {
 
 /// Checks that the node is a UVC gadget node with streaming output.
 pub(crate) fn check_gadget(fd: BorrowedFd<'_>) -> io::Result<()> {
+    check_node(fd, c"g_uvc", CAP_VIDEO_OUTPUT | CAP_STREAMING)
+}
+
+/// Checks that the node is a UVC camera node with streaming capture.
+pub(crate) fn check_camera(fd: BorrowedFd<'_>) -> io::Result<()> {
+    check_node(fd, c"uvcvideo", CAP_VIDEO_CAPTURE | CAP_STREAMING)
+}
+
+/// Checks the driver and the device capabilities of the node.
+fn check_node(fd: BorrowedFd<'_>, expected: &CStr, caps: u32) -> io::Result<()> {
     // SAFETY: `VIDIOC_QUERYCAP` is `_IOR` with `struct v4l2_capability`, and
     // `Capability` has its layout. Each bit pattern is a valid `Capability`.
     let capability = unsafe { ioctl(fd, Getter::<VIDIOC_QUERYCAP, Capability>::new()) }?;
     let driver = CStr::from_bytes_until_nul(&capability.driver).unwrap_or_default();
-    if driver != c"g_uvc" {
+    if driver != expected {
         return Err(io::Error::other(format!(
-            "the gadget node has the driver {}, expected g_uvc",
-            driver.to_string_lossy()
+            "the node has the driver {}, expected {}",
+            driver.to_string_lossy(),
+            expected.to_string_lossy()
         )));
     }
-    let caps = CAP_VIDEO_OUTPUT | CAP_STREAMING;
     if capability.device_caps & caps != caps {
-        return Err(io::Error::other("the node has no streaming video output"));
+        return Err(io::Error::other(format!(
+            "the node has the capabilities {:#x}, expected {caps:#x}",
+            capability.device_caps
+        )));
     }
     Ok(())
 }
 
-/// Sets the MJPEG format of `width` x `height`. Returns an error if the gadget has no
-/// such format.
-pub(crate) fn set_format(fd: BorrowedFd<'_>, width: u32, height: u32) -> io::Result<()> {
+/// Sets the MJPEG format of `width` x `height`. Returns an error if the node has
+/// no such format.
+pub(crate) fn set_format(
+    fd: BorrowedFd<'_>,
+    queue: Queue,
+    width: u32,
+    height: u32,
+) -> io::Result<()> {
     let mut format = Format::new_zeroed();
-    format.kind = BUF_TYPE_VIDEO_OUTPUT;
+    format.kind = queue.kind();
     format.width = width;
     format.height = height;
     format.pixelformat = PIX_FMT_MJPEG;
@@ -237,37 +279,40 @@ pub(crate) fn set_format(fd: BorrowedFd<'_>, width: u32, height: u32) -> io::Res
     unsafe { ioctl(fd, Updater::<VIDIOC_S_FMT, Format>::new(&mut format)) }?;
     if (format.pixelformat, format.width, format.height) != (PIX_FMT_MJPEG, width, height) {
         return Err(io::Error::other(format!(
-            "the gadget has no MJPEG format of {width}x{height}"
+            "the node has no MJPEG format of {width}x{height}"
         )));
     }
     Ok(())
 }
 
-/// Returns the largest frame size of the current format.
+/// Returns the largest frame size of the current output format.
 pub(crate) fn frame_size(fd: BorrowedFd<'_>) -> io::Result<u32> {
     let mut format = Format::new_zeroed();
-    format.kind = BUF_TYPE_VIDEO_OUTPUT;
+    format.kind = Queue::Output.kind();
     // SAFETY: `VIDIOC_G_FMT` is `_IOWR` with `struct v4l2_format`, and `Format`
     // has its layout.
     unsafe { ioctl(fd, Updater::<VIDIOC_G_FMT, Format>::new(&mut format)) }?;
     Ok(format.size_image)
 }
 
-/// Sets the frame time that the kernel uses to spread a frame over its USB
-/// requests.
+/// Sets the frame time in seconds, as a fraction. Returns the frame time that
+/// the driver chose. On the gadget node, the kernel spreads a frame over its
+/// USB requests in this time. On the capture node, the camera sends frames at
+/// this interval.
 pub(crate) fn set_frame_time(
     fd: BorrowedFd<'_>,
+    queue: Queue,
     numerator: u32,
     denominator: u32,
-) -> io::Result<()> {
+) -> io::Result<(u32, u32)> {
     let mut parm = StreamParm::new_zeroed();
-    parm.kind = BUF_TYPE_VIDEO_OUTPUT;
+    parm.kind = queue.kind();
     parm.numerator = numerator;
     parm.denominator = denominator;
     // SAFETY: `VIDIOC_S_PARM` is `_IOWR` with `struct v4l2_streamparm`, and
     // `StreamParm` has its layout.
     unsafe { ioctl(fd, Updater::<VIDIOC_S_PARM, StreamParm>::new(&mut parm)) }?;
-    Ok(())
+    Ok((parm.numerator, parm.denominator))
 }
 
 pub(crate) fn subscribe(fd: BorrowedFd<'_>, kind: u32) -> io::Result<()> {
@@ -312,10 +357,10 @@ pub(crate) fn send_response(fd: BorrowedFd<'_>, length: i32, data: [u8; 60]) -> 
 
 /// Allocates `count` MMAP buffers, or frees them with a count of 0. Returns the
 /// number of buffers that the kernel allocated.
-pub(crate) fn request_buffers(fd: BorrowedFd<'_>, count: u32) -> io::Result<u32> {
+pub(crate) fn request_buffers(fd: BorrowedFd<'_>, queue: Queue, count: u32) -> io::Result<u32> {
     let mut request = RequestBuffers::new_zeroed();
     request.count = count;
-    request.kind = BUF_TYPE_VIDEO_OUTPUT;
+    request.kind = queue.kind();
     request.memory = MEMORY_MMAP;
     // SAFETY: `VIDIOC_REQBUFS` is `_IOWR` with `struct v4l2_requestbuffers`,
     // and `RequestBuffers` has its layout.
@@ -329,8 +374,12 @@ pub(crate) fn request_buffers(fd: BorrowedFd<'_>, count: u32) -> io::Result<u32>
 }
 
 /// Returns the buffer with the index, or `None` if it does not exist.
-pub(crate) fn query_buffer(fd: BorrowedFd<'_>, index: u32) -> io::Result<Option<Buffer>> {
-    let mut buffer = Buffer::output(index);
+pub(crate) fn query_buffer(
+    fd: BorrowedFd<'_>,
+    queue: Queue,
+    index: u32,
+) -> io::Result<Option<Buffer>> {
+    let mut buffer = Buffer::new(queue, index);
     // SAFETY: `VIDIOC_QUERYBUF` is `_IOWR` with `struct v4l2_buffer`, and
     // `Buffer` has its layout. MMAP buffers carry no user pointers.
     match unsafe { ioctl(fd, Updater::<VIDIOC_QUERYBUF, Buffer>::new(&mut buffer)) } {
@@ -341,10 +390,15 @@ pub(crate) fn query_buffer(fd: BorrowedFd<'_>, index: u32) -> io::Result<Option<
 }
 
 /// Queues the buffer with `bytes_used` bytes and the current `CLOCK_MONOTONIC`
-/// time.
-pub(crate) fn queue_buffer(fd: BorrowedFd<'_>, index: u32, bytes_used: u32) -> io::Result<()> {
+/// time. The capture queue ignores both.
+pub(crate) fn queue_buffer(
+    fd: BorrowedFd<'_>,
+    queue: Queue,
+    index: u32,
+    bytes_used: u32,
+) -> io::Result<()> {
     let now = clock_gettime(ClockId::Monotonic);
-    let mut buffer = Buffer::output(index);
+    let mut buffer = Buffer::new(queue, index);
     buffer.bytes_used = bytes_used;
     buffer.field = FIELD_NONE;
     buffer.timestamp_sec = now.tv_sec;
@@ -355,10 +409,10 @@ pub(crate) fn queue_buffer(fd: BorrowedFd<'_>, index: u32, bytes_used: u32) -> i
     Ok(())
 }
 
-/// Returns a buffer that the kernel has sent, or `None` if the kernel has sent
-/// no buffer.
-pub(crate) fn dequeue_buffer(fd: BorrowedFd<'_>) -> io::Result<Option<Buffer>> {
-    let mut buffer = Buffer::output(0);
+/// Returns a buffer that the kernel has sent or filled, or `None` if no buffer
+/// is ready.
+pub(crate) fn dequeue_buffer(fd: BorrowedFd<'_>, queue: Queue) -> io::Result<Option<Buffer>> {
+    let mut buffer = Buffer::new(queue, 0);
     // SAFETY: `VIDIOC_DQBUF` is `_IOWR` with `struct v4l2_buffer`, and `Buffer`
     // has its layout. MMAP buffers carry no user pointers.
     match unsafe { ioctl(fd, Updater::<VIDIOC_DQBUF, Buffer>::new(&mut buffer)) } {
@@ -368,34 +422,48 @@ pub(crate) fn dequeue_buffer(fd: BorrowedFd<'_>) -> io::Result<Option<Buffer>> {
     }
 }
 
-pub(crate) fn stream_on(fd: BorrowedFd<'_>) -> io::Result<()> {
-    stream::<VIDIOC_STREAMON>(fd)
+pub(crate) fn stream_on(fd: BorrowedFd<'_>, queue: Queue) -> io::Result<()> {
+    stream::<VIDIOC_STREAMON>(fd, queue)
 }
 
-pub(crate) fn stream_off(fd: BorrowedFd<'_>) -> io::Result<()> {
-    stream::<VIDIOC_STREAMOFF>(fd)
+pub(crate) fn stream_off(fd: BorrowedFd<'_>, queue: Queue) -> io::Result<()> {
+    stream::<VIDIOC_STREAMOFF>(fd, queue)
 }
 
-fn stream<const OPCODE: Opcode>(fd: BorrowedFd<'_>) -> io::Result<()> {
+fn stream<const OPCODE: Opcode>(fd: BorrowedFd<'_>, queue: Queue) -> io::Result<()> {
     // SAFETY: The callers pass only `VIDIOC_STREAMON` or `VIDIOC_STREAMOFF`,
     // which are `_IOW` with an int. `Setter` passes a pointer to it, as the
     // kernel expects.
-    unsafe {
-        ioctl(
-            fd,
-            Setter::<OPCODE, i32>::new(BUF_TYPE_VIDEO_OUTPUT.cast_signed()),
-        )
-    }?;
+    unsafe { ioctl(fd, Setter::<OPCODE, i32>::new(queue.kind().cast_signed())) }?;
     Ok(())
 }
 
+/// Returns the current `CLOCK_MONOTONIC` time.
+pub(crate) fn monotonic_now() -> Duration {
+    let now = clock_gettime(ClockId::Monotonic);
+    let seconds = u64::try_from(now.tv_sec).unwrap_or(0);
+    let nanos = u64::try_from(now.tv_nsec).unwrap_or(0);
+    Duration::from_secs(seconds) + Duration::from_nanos(nanos)
+}
+
 impl Buffer {
-    fn output(index: u32) -> Self {
+    fn new(queue: Queue, index: u32) -> Self {
         let mut buffer = Self::new_zeroed();
         buffer.index = index;
-        buffer.kind = BUF_TYPE_VIDEO_OUTPUT;
+        buffer.kind = queue.kind();
         buffer.memory = MEMORY_MMAP;
         buffer
+    }
+
+    /// Returns the `CLOCK_MONOTONIC` time of the buffer, or `None` if the
+    /// driver uses another clock.
+    pub(crate) fn monotonic_time(&self) -> Option<Duration> {
+        if self.flags & BUF_FLAG_TIMESTAMP_MASK != BUF_FLAG_TIMESTAMP_MONOTONIC {
+            return None;
+        }
+        let seconds = u64::try_from(self.timestamp_sec).ok()?;
+        let micros = u32::try_from(self.timestamp_usec).ok()?;
+        Some(Duration::from_secs(seconds) + Duration::from_micros(micros.into()))
     }
 }
 
