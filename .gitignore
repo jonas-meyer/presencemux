@@ -12,3 +12,6 @@ rustc-ice-*.txt
 # insta: snapshots waiting for review
 *.snap.new
 *.pending-snap
+
+# Python bytecode
+__pycache__/
