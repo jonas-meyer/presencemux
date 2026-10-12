@@ -3,14 +3,8 @@
 
 mod capture;
 mod choice;
+mod delay;
 mod discovery;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only the tests use the requantizer until the worker sends live frames"
-    )
-)]
 mod live;
 mod output;
 mod systemd;
@@ -41,7 +35,9 @@ use tracing_subscriber::prelude::*;
 
 use presencemux_api::cam::DeviceStatus;
 
-use crate::capture::{CameraStatus, Capture};
+use crate::capture::{CameraStatus, Capture, LiveFrame};
+use crate::choice::Shown;
+use crate::delay::Delays;
 use crate::discovery::Discovery;
 use crate::output::{Frame, FrameId, Output};
 use crate::systemd::Watchdog;
@@ -53,6 +49,10 @@ const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
 /// `streaming_maxpacket` of the gadget.
 const MAX_PAYLOAD: u32 = 2048;
+/// The frame time of the gadget in seconds, as a fraction. The kernel spreads
+/// each frame over this time, or sends it at the full rate of the bus if the
+/// frame needs more time.
+const GADGET_FRAME_TIME: (u32, u32) = (1, 240);
 /// The time between two frames at 30 fps.
 const FRAME_PERIOD: Duration = Duration::from_nanos(33_333_333);
 /// The interval between two watchdog pings while the worker waits for the
@@ -160,6 +160,8 @@ async fn run() -> Result<(), Error> {
         start_pending: false,
         frame_error: None,
         camera: capture.status(v4l2::monotonic_now()),
+        live_queued: None,
+        delays: Delays::default(),
     };
     tracing::info!(
         "presencemux-cam started, adopted: {adopted}, streaming: {}, camera: {}",
@@ -187,12 +189,15 @@ async fn run() -> Result<(), Error> {
                 capture.set_node(discovery.nodes().camera());
             }
             error = failure(&mut varlink) => return Err(Error::Varlink(error)),
+            () = capture.live_ready() => {
+                worker.queue_frame(node.get_ref().as_fd(), &control, &capture, Trigger::LiveFrame);
+            }
             _ = frames.tick() => {
                 if capture.has_ended() {
                     return Err(Error::CaptureEnded);
                 }
                 worker.update(&control, &capture);
-                worker.send_frame(node.get_ref().as_fd());
+                worker.queue_frame(node.get_ref().as_fd(), &control, &capture, Trigger::Timer);
                 watchdog.ping();
             }
         }
@@ -215,6 +220,10 @@ struct Worker {
     frame_error: Option<String>,
     /// The last status of the camera.
     camera: CameraStatus,
+    /// The last live frame that the worker queued.
+    live_queued: Option<FrameId>,
+    /// The delays of the live frames.
+    delays: Delays,
 }
 
 impl Worker {
@@ -257,16 +266,20 @@ impl Worker {
         }
     }
 
-    /// Starts the stream and queues the first frame. On an error, the stream
-    /// start stays pending.
+    /// Starts the stream and queues blank as the first frame. If the start
+    /// fails, the stream start stays pending.
     fn start_stream(&mut self, fd: BorrowedFd<'_>) {
         match Output::start(fd) {
-            Ok(output) => {
+            Ok(mut output) => {
+                let queued = output.queue(fd, BLANK);
                 self.output = Some(output);
                 self.start_pending = false;
                 self.frame_error = None;
+                self.live_queued = None;
                 tracing::info!("stream started");
-                self.send_frame(fd);
+                if let Err(error) = queued {
+                    self.log_error(&format!("cannot queue a frame: {error}"));
+                }
             }
             Err(error) => {
                 self.start_pending = true;
@@ -275,22 +288,54 @@ impl Worker {
         }
     }
 
-    /// Queues the next frame, if a stream runs and a buffer is free. Tries a
-    /// pending stream start again first.
-    fn send_frame(&mut self, fd: BorrowedFd<'_>) {
-        if self.start_pending {
+    /// Queues the next frame, if a stream runs and a buffer is free. Queues a
+    /// new live frame at once. On the frame timer, first tries a pending stream
+    /// start again. Then queues blank if frame choice does not show live or no
+    /// fresh live frame exists. After an error with a live frame, queues blank.
+    fn queue_frame(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        control: &Shared,
+        capture: &Capture,
+        trigger: Trigger,
+    ) {
+        if trigger == Trigger::Timer && self.start_pending {
             self.start_stream(fd);
             return;
         }
         let Some(output) = &mut self.output else {
             return;
         };
-        match output
-            .dequeue_sent(fd)
-            .and_then(|()| output.send(fd, BLANK))
-        {
+        if let Err(error) = output.dequeue_sent(fd) {
+            self.log_error(&format!("cannot dequeue a sent buffer: {error}"));
+            return;
+        }
+        let now = v4l2::monotonic_now();
+        let control = control.borrow();
+        let shown = control.choice.shown(now, control.newest);
+        let live_queued = &mut self.live_queued;
+        let delays = &mut self.delays;
+        let result = capture.with_live_frame(|live| {
+            match next_frame(shown, live, *live_queued, now, trigger) {
+                Next::Nothing => Ok(()),
+                Next::Blank => output.queue(fd, BLANK).map(drop),
+                Next::Live(live) => match output.queue(fd, live.frame) {
+                    Ok(false) => Ok(()),
+                    Ok(true) => {
+                        *live_queued = Some(live.frame.id);
+                        delays.record(live.times, v4l2::monotonic_now());
+                        Ok(())
+                    }
+                    Err(error) => {
+                        *live_queued = Some(live.frame.id);
+                        output.queue(fd, BLANK).and(Err(error))
+                    }
+                },
+            }
+        });
+        match result {
             Ok(()) => self.frame_error = None,
-            Err(error) => self.log_error(&format!("cannot send a frame: {error}")),
+            Err(error) => self.log_error(&format!("cannot queue a frame: {error}")),
         }
     }
 
@@ -311,10 +356,13 @@ impl Worker {
         } else {
             DeviceStatus::Ready
         };
+        control.newest = capture.newest();
         let newest = control.newest;
         if let Some(latch) = control.choice.check(now, newest) {
             tracing::info!("latched: {}, epoch {}", latch.reason, latch.grant.epoch);
         }
+        let live = control.choice.shown(now, newest) == Shown::Live;
+        capture.set_live(live && self.output.is_some());
     }
 
     /// Logs an error of the stream, unless it is the same as the last one.
@@ -323,6 +371,45 @@ impl Worker {
             tracing::warn!("{message}");
             self.frame_error = Some(message.to_owned());
         }
+    }
+}
+
+/// The event that makes the worker queue a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Trigger {
+    /// The frame timer.
+    Timer,
+    /// A new live frame.
+    LiveFrame,
+}
+
+/// The frame that the worker queues next.
+#[derive(Clone, Copy, Debug)]
+enum Next<'a> {
+    /// The blank frame.
+    Blank,
+    /// The newest live frame.
+    Live(LiveFrame<'a>),
+    /// No frame. The host shows the last frame again.
+    Nothing,
+}
+
+/// Returns the frame that the worker queues next at the time `now`, for the
+/// frame `shown` of frame choice and the event `trigger`. `live` is the newest
+/// live frame, and `live_queued` the last live frame that the worker queued.
+fn next_frame<'a>(
+    shown: Shown<'_>,
+    live: Option<LiveFrame<'a>>,
+    live_queued: Option<FrameId>,
+    now: Duration,
+    trigger: Trigger,
+) -> Next<'a> {
+    let fresh = live.filter(|live| choice::is_fresh(now, Some(live.times.captured)));
+    match (shown, fresh) {
+        (Shown::Live, Some(live)) if live_queued == Some(live.frame.id) => Next::Nothing,
+        (Shown::Live, Some(live)) => Next::Live(live),
+        _ if trigger == Trigger::Timer => Next::Blank,
+        _ => Next::Nothing,
     }
 }
 
@@ -402,7 +489,7 @@ fn open(path: &Path) -> Result<OwnedFd, Error> {
 fn prepare_node(fd: BorrowedFd<'_>) -> io::Result<()> {
     v4l2::check_gadget(fd)?;
     v4l2::set_format(fd, Queue::Output, WIDTH, HEIGHT)?;
-    v4l2::set_frame_time(fd, Queue::Output, 1, 60)?;
+    v4l2::set_frame_time(fd, Queue::Output, GADGET_FRAME_TIME.0, GADGET_FRAME_TIME.1)?;
     for kind in [
         uvc::EVENT_DISCONNECT,
         uvc::EVENT_CONNECT,
@@ -456,5 +543,145 @@ mod tests {
         let width = u16::from_be_bytes([size[2], size[3]]);
 
         assert_eq!((u32::from(width), u32::from(height)), (WIDTH, HEIGHT));
+    }
+
+    const NOW: Duration = Duration::from_secs(100);
+
+    fn live_frame(id: u64, captured: Duration) -> LiveFrame<'static> {
+        LiveFrame {
+            frame: Frame {
+                id: FrameId(id),
+                jpeg: b"jpeg",
+            },
+            times: capture::LiveTimes {
+                captured,
+                dequeued: captured,
+                requantized: captured,
+            },
+        }
+    }
+
+    /// Returns the identity of the live frame in `next`, if it is live.
+    fn live_id(next: Next<'_>) -> Option<FrameId> {
+        match next {
+            Next::Live(live) => Some(live.frame.id),
+            Next::Blank | Next::Nothing => None,
+        }
+    }
+
+    #[test]
+    fn unqueued_live_frame_gives_live_on_a_live_frame_event() {
+        let live = live_frame(2, NOW);
+
+        let next = next_frame(
+            Shown::Live,
+            Some(live),
+            Some(FrameId(1)),
+            NOW,
+            Trigger::LiveFrame,
+        );
+
+        assert_eq!(live_id(next), Some(FrameId(2)));
+    }
+
+    #[test]
+    fn queued_live_frame_gives_nothing_on_the_frame_timer() {
+        let live = live_frame(2, NOW);
+
+        let next = next_frame(
+            Shown::Live,
+            Some(live),
+            Some(FrameId(2)),
+            NOW,
+            Trigger::Timer,
+        );
+
+        assert!(matches!(next, Next::Nothing));
+    }
+
+    #[test]
+    fn live_frame_499_ms_old_gives_live_on_the_frame_timer() {
+        let live = live_frame(2, NOW);
+
+        let next = next_frame(
+            Shown::Live,
+            Some(live),
+            None,
+            NOW + Duration::from_millis(499),
+            Trigger::Timer,
+        );
+
+        assert_eq!(live_id(next), Some(FrameId(2)));
+    }
+
+    #[test]
+    fn live_frame_500_ms_old_gives_blank_on_the_frame_timer() {
+        let live = live_frame(2, NOW);
+
+        let next = next_frame(
+            Shown::Live,
+            Some(live),
+            None,
+            NOW + Duration::from_millis(500),
+            Trigger::Timer,
+        );
+
+        assert!(matches!(next, Next::Blank));
+    }
+
+    #[test]
+    fn live_frame_500_ms_old_gives_nothing_on_a_live_frame_event() {
+        let live = live_frame(2, NOW);
+
+        let next = next_frame(
+            Shown::Live,
+            Some(live),
+            None,
+            NOW + Duration::from_millis(500),
+            Trigger::LiveFrame,
+        );
+
+        assert!(matches!(next, Next::Nothing));
+    }
+
+    #[test]
+    fn live_frame_from_the_future_gives_blank_on_the_frame_timer() {
+        let live = live_frame(2, NOW + Duration::from_millis(1));
+
+        let next = next_frame(Shown::Live, Some(live), None, NOW, Trigger::Timer);
+
+        assert!(matches!(next, Next::Blank));
+    }
+
+    #[test]
+    fn live_without_a_live_frame_gives_blank_on_the_frame_timer() {
+        let next = next_frame(Shown::Live, None, None, NOW, Trigger::Timer);
+
+        assert!(matches!(next, Next::Blank));
+    }
+
+    #[test]
+    fn blank_with_a_fresh_live_frame_gives_blank_on_the_frame_timer() {
+        let live = live_frame(2, NOW);
+
+        let next = next_frame(Shown::Blank, Some(live), None, NOW, Trigger::Timer);
+
+        assert!(matches!(next, Next::Blank));
+    }
+
+    #[test]
+    fn slate_gives_blank_on_the_frame_timer() {
+        let next = next_frame(Shown::Slate("away"), None, None, NOW, Trigger::Timer);
+
+        assert!(matches!(next, Next::Blank));
+    }
+
+    #[test]
+    fn blank_with_a_fresh_live_frame_gives_nothing_on_a_live_frame_event() {
+        let live = live_frame(2, NOW);
+
+        let next = next_frame(Shown::Blank, Some(live), None, NOW, Trigger::LiveFrame);
+
+        assert!(matches!(next, Next::Nothing));
     }
 }

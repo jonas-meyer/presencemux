@@ -1,10 +1,12 @@
 //! The capture of the camera on its own thread.
 //!
 //! The capture thread makes all ioctls on the capture node. The event loop of
-//! the gadget node never waits for the camera.
+//! the gadget node never waits for the camera. While the event loop wants live
+//! frames, the thread also requantizes the newest frame and keeps the result.
 
 use std::fmt;
 use std::io;
+use std::mem;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -14,9 +16,12 @@ use std::time::Duration;
 use rustix::event::{EventfdFlags, PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
+use tokio::sync::Notify;
 
 use crate::discovery::CameraNode;
-use crate::v4l2::{self, BUF_FLAG_ERROR, Queue, monotonic_now};
+use crate::live::{MAX_SIZE, Requantizer};
+use crate::output::{Frame, FrameId};
+use crate::v4l2::{self, CaptureStream, Dequeued, Queue, monotonic_now};
 use crate::{HEIGHT, WIDTH};
 
 /// The number of kernel buffers of the capture queue.
@@ -70,6 +75,7 @@ impl Capture {
         let shared = Arc::new(Shared {
             state: Mutex::default(),
             wake,
+            live_ready: Notify::new(),
         });
         let thread = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
@@ -92,10 +98,57 @@ impl Capture {
         self.shared.lock().status(now)
     }
 
+    /// Returns the capture time of the newest camera frame of the current node.
+    pub(crate) fn newest(&self) -> Option<Duration> {
+        self.shared.lock().stream.newest
+    }
+
+    /// Sets whether the thread requantizes the camera frames into live frames.
+    /// If `live` is false, drops the live frame.
+    pub(crate) fn set_live(&self, live: bool) {
+        self.shared.lock().set_live(live);
+    }
+
+    /// Waits until the thread has a new live frame.
+    pub(crate) async fn live_ready(&self) {
+        self.shared.live_ready.notified().await;
+    }
+
+    /// Calls `f` with the newest live frame of the current node. Holds the mutex
+    /// of the shared state while `f` runs.
+    pub(crate) fn with_live_frame<R>(&self, f: impl FnOnce(Option<LiveFrame<'_>>) -> R) -> R {
+        let state = self.shared.lock();
+        f(state.live_frame.as_ref().map(|stored| LiveFrame {
+            frame: Frame {
+                id: stored.id,
+                jpeg: &stored.jpeg,
+            },
+            times: stored.times,
+        }))
+    }
+
     /// Returns whether the capture thread has ended. Only a panic ends it.
     pub(crate) fn has_ended(&self) -> bool {
         self.thread.is_finished()
     }
+}
+
+/// The newest live frame, borrowed from the shared state.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LiveFrame<'a> {
+    pub(crate) frame: Frame<'a>,
+    pub(crate) times: LiveTimes,
+}
+
+/// The `CLOCK_MONOTONIC` times of a live frame in the worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LiveTimes {
+    /// The capture time of the camera frame.
+    pub(crate) captured: Duration,
+    /// The time at which the thread dequeued the camera frame.
+    pub(crate) dequeued: Duration,
+    /// The time at which the requantization ended.
+    pub(crate) requantized: Duration,
 }
 
 /// The state that the capture thread and the handle share.
@@ -104,6 +157,8 @@ struct Shared {
     state: Mutex<State>,
     /// An eventfd that wakes the thread when the node changes.
     wake: OwnedFd,
+    /// The `Notify` that wakes the event loop for each new live frame.
+    live_ready: Notify,
 }
 
 impl Shared {
@@ -178,11 +233,26 @@ impl Shared {
     }
 }
 
-/// The camera node and the state of its stream.
+/// The camera node, the state of its stream and the newest live frame.
 #[derive(Debug, Default)]
 struct State {
     node: Option<CameraNode>,
     stream: Stream,
+    /// Whether the event loop wants live frames.
+    live: bool,
+    /// The newest live frame of the current node.
+    live_frame: Option<StoredLiveFrame>,
+    /// The number of live frames so far. The count gives each frame its
+    /// identity.
+    live_count: u64,
+}
+
+/// A live frame that the shared state owns.
+#[derive(Debug)]
+struct StoredLiveFrame {
+    id: FrameId,
+    times: LiveTimes,
+    jpeg: Vec<u8>,
 }
 
 /// The state of the stream on the current node. Times are `CLOCK_MONOTONIC`.
@@ -214,6 +284,39 @@ impl State {
         }
         self.node = node.cloned();
         self.stream = Stream::new(now);
+        self.live_frame = None;
+        true
+    }
+
+    /// Sets whether the event loop wants live frames. If `live` is false, drops
+    /// the live frame.
+    fn set_live(&mut self, live: bool) {
+        self.live = live;
+        if !live {
+            self.live_frame = None;
+        }
+    }
+
+    /// Replaces the live frame with `jpeg`, with a new identity, and leaves
+    /// the buffer of the replaced frame in `jpeg` for reuse. Ignores `jpeg` if
+    /// the event loop does not want live frames, or if the node is not
+    /// `node`. Returns whether the node is still `node`.
+    fn set_live_frame(&mut self, node: &CameraNode, times: LiveTimes, jpeg: &mut Vec<u8>) -> bool {
+        if self.node.as_ref() != Some(node) {
+            return false;
+        }
+        if !self.live {
+            return true;
+        }
+        self.live_count += 1;
+        let stored = StoredLiveFrame {
+            id: FrameId(self.live_count),
+            times,
+            jpeg: mem::take(jpeg),
+        };
+        if let Some(replaced) = self.live_frame.replace(stored) {
+            *jpeg = replaced.jpeg;
+        }
         true
     }
 
@@ -293,10 +396,9 @@ fn attempt(shared: &Shared, node: &CameraNode, last_error: &mut Option<String>) 
     camera.run(shared, node)
 }
 
-/// An open capture node with a running stream. A drop closes the node. The
-/// kernel then stops the stream and frees the buffers.
+/// An open capture node with a running stream.
 struct Camera {
-    fd: OwnedFd,
+    stream: CaptureStream,
     /// The frame time in seconds that the driver chose, as a fraction.
     frame_time: (u32, u32),
 }
@@ -311,22 +413,15 @@ impl Camera {
         v4l2::set_format(borrowed, Queue::Capture, WIDTH, HEIGHT)?;
         let (numerator, denominator) = FRAME_TIME;
         let frame_time = v4l2::set_frame_time(borrowed, Queue::Capture, numerator, denominator)?;
-        let count = v4l2::request_buffers(borrowed, Queue::Capture, BUFFERS)?;
-        if count < 2 {
-            return Err(io::Error::other(format!(
-                "the kernel allocated only {count} buffers"
-            )));
-        }
-        for index in 0..count {
-            v4l2::queue_buffer(borrowed, Queue::Capture, index, 0)?;
-        }
-        v4l2::stream_on(borrowed, Queue::Capture)?;
-        Ok(Self { fd, frame_time })
+        let stream = CaptureStream::start(fd, BUFFERS)?;
+        Ok(Self { stream, frame_time })
     }
 
     /// Records the frames until the node changes or the stream fails. A stream
-    /// without a frame for [`FRAME_TIMEOUT`] fails.
+    /// without a frame for [`FRAME_TIMEOUT`] fails. While the event loop wants
+    /// live frames, requantizes the newest frame after each wait.
     fn run(&self, shared: &Shared, node: &CameraNode) -> io::Result<()> {
+        let mut live_frames = LiveFrames::new();
         let mut last_frame = monotonic_now();
         loop {
             let remaining = (last_frame + FRAME_TIMEOUT)
@@ -338,38 +433,129 @@ impl Camera {
                         FRAME_TIMEOUT.as_secs()
                     ))
                 })?;
-            let flags = shared.wait(Some(self.fd.as_fd()), Some(remaining))?;
-            let newest = self.dequeue()?;
-            if newest.is_some() {
-                last_frame = monotonic_now();
+            let flags = shared.wait(Some(self.stream.as_fd()), Some(remaining))?;
+            let newest = self.newest_frame()?;
+            let dequeued = monotonic_now();
+            let captured = newest
+                .as_ref()
+                .map(|frame| frame.monotonic_time().unwrap_or(dequeued));
+            if captured.is_some() {
+                last_frame = dequeued;
             } else if flags.intersects(PollFlags::ERR | PollFlags::HUP) {
                 return Err(io::Error::other(format!(
                     "poll gave {flags:?} without a frame"
                 )));
             }
             let current = shared.update(node, |stream| {
-                if newest.is_some() {
-                    stream.newest = newest;
+                if captured.is_some() {
+                    stream.newest = captured;
                 }
             });
+            if !current {
+                return Ok(());
+            }
+            let (Some(frame), Some(captured)) = (newest, captured) else {
+                continue;
+            };
+            let wanted = shared.lock().live;
+            let current = if wanted {
+                live_frames.requantize(shared, node, &frame, captured, dequeued)
+            } else {
+                true
+            };
+            frame.requeue()?;
             if !current {
                 return Ok(());
             }
         }
     }
 
-    /// Dequeues each filled buffer and queues it again. Returns the capture
-    /// time of the newest frame without the error flag.
-    fn dequeue(&self) -> io::Result<Option<Duration>> {
-        let fd = self.fd.as_fd();
+    /// Dequeues each filled buffer. Queues each buffer again, except the newest
+    /// buffer without the error flag. Returns that buffer.
+    fn newest_frame(&self) -> io::Result<Option<Dequeued<'_>>> {
         let mut newest = None;
-        while let Some(buffer) = v4l2::dequeue_buffer(fd, Queue::Capture)? {
-            v4l2::queue_buffer(fd, Queue::Capture, buffer.index, 0)?;
-            if buffer.flags & BUF_FLAG_ERROR == 0 {
-                newest = Some(buffer.monotonic_time().unwrap_or_else(monotonic_now));
+        while let Some(buffer) = self.stream.dequeue()? {
+            if buffer.has_error() {
+                buffer.requeue()?;
+            } else if let Some(older) = newest.replace(buffer) {
+                older.requeue()?;
             }
         }
         Ok(newest)
+    }
+}
+
+/// The requantizer and its state on the capture thread, for one open camera.
+struct LiveFrames {
+    requantizer: Requantizer,
+    /// The buffer for the next live frame.
+    jpeg: Vec<u8>,
+    /// The quality of the last live frame.
+    quality: Option<u8>,
+    /// The last error of the requantization. The thread logs an error only when
+    /// it differs from this one.
+    last_error: Option<String>,
+}
+
+impl LiveFrames {
+    fn new() -> Self {
+        Self {
+            requantizer: Requantizer::new(MAX_SIZE),
+            jpeg: Vec::new(),
+            quality: None,
+            last_error: None,
+        }
+    }
+
+    /// Requantizes the camera frame `frame` into the live frame of `node`, and
+    /// wakes the event loop. `captured` and `dequeued` are the times of the
+    /// camera frame. Logs a new error and a change of the quality. Returns
+    /// whether the node is still `node`.
+    fn requantize(
+        &mut self,
+        shared: &Shared,
+        node: &CameraNode,
+        frame: &Dequeued<'_>,
+        captured: Duration,
+        dequeued: Duration,
+    ) -> bool {
+        let result = frame
+            .data()
+            .map_err(|error| error.to_string())
+            .and_then(|data| {
+                (self.requantizer.requantize(data, &mut self.jpeg))
+                    .map(|live| (live.quality, live.one_part, live.jpeg.len()))
+                    .map_err(|error| error.to_string())
+            });
+        let (quality, one_part, size) = match result {
+            Ok(live) => live,
+            Err(error) => {
+                let message = format!("cannot requantize a frame: {error}");
+                if self.last_error.as_ref() != Some(&message) {
+                    tracing::warn!("{message}");
+                    self.last_error = Some(message);
+                }
+                return true;
+            }
+        };
+        self.last_error = None;
+        if self.quality != Some(quality) {
+            tracing::info!("live quality: {quality}, {size} bytes");
+            self.quality = Some(quality);
+        }
+        if one_part {
+            tracing::debug!("the parts of a frame did not synchronize");
+        }
+        let times = LiveTimes {
+            captured,
+            dequeued,
+            requantized: monotonic_now(),
+        };
+        let current = shared.lock().set_live_frame(node, times, &mut self.jpeg);
+        if current {
+            shared.live_ready.notify_one();
+        }
+        current
     }
 }
 
@@ -392,6 +578,7 @@ mod tests {
         State {
             node: Some(node(1)),
             stream,
+            ..State::default()
         }
     }
 
@@ -418,6 +605,7 @@ mod tests {
                 failed: true,
                 ..Stream::default()
             },
+            ..State::default()
         };
 
         assert_eq!(state.status(START), CameraStatus::Missing);
@@ -509,5 +697,126 @@ mod tests {
 
         assert!(!current);
         assert_eq!(state.status(START), CameraStatus::Initializing);
+    }
+
+    fn times(captured: Duration) -> LiveTimes {
+        LiveTimes {
+            captured,
+            dequeued: captured,
+            requantized: captured,
+        }
+    }
+
+    /// Returns a state with a stream on node 1 that wants live frames.
+    fn live_state() -> State {
+        State {
+            live: true,
+            ..state(Stream::new(START))
+        }
+    }
+
+    fn live_id(state: &State) -> Option<FrameId> {
+        state.live_frame.as_ref().map(|frame| frame.id)
+    }
+
+    #[test]
+    fn first_live_frame_does_not_have_the_identity_of_blank() {
+        let mut state = live_state();
+
+        state.set_live_frame(&node(1), times(START), &mut b"jpeg".to_vec());
+
+        assert!(live_id(&state).is_some());
+        assert_ne!(live_id(&state), Some(crate::BLANK.id));
+    }
+
+    #[test]
+    fn each_live_frame_has_a_new_identity() {
+        let mut state = live_state();
+        state.set_live_frame(&node(1), times(START), &mut b"first".to_vec());
+        let first = live_id(&state);
+
+        state.set_live_frame(&node(1), times(START), &mut b"second".to_vec());
+
+        assert_ne!(live_id(&state), first);
+    }
+
+    #[test]
+    fn new_live_frame_replaces_the_bytes_of_the_last_one() {
+        let mut state = live_state();
+        state.set_live_frame(&node(1), times(START), &mut b"first".to_vec());
+
+        state.set_live_frame(&node(1), times(START), &mut b"second".to_vec());
+
+        let stored = state.live_frame.as_ref().map(|frame| frame.jpeg.as_slice());
+        assert_eq!(stored, Some(&b"second"[..]));
+    }
+
+    #[test]
+    fn new_live_frame_returns_the_buffer_of_the_last_one() {
+        let mut state = live_state();
+        state.set_live_frame(&node(1), times(START), &mut b"first".to_vec());
+        let mut jpeg = b"second".to_vec();
+
+        state.set_live_frame(&node(1), times(START), &mut jpeg);
+
+        assert_eq!(jpeg, b"first");
+    }
+
+    #[test]
+    fn live_frame_for_an_old_node_changes_nothing() {
+        let mut state = live_state();
+        state.set_node(Some(&node(2)), START);
+
+        state.set_live_frame(&node(1), times(START), &mut b"jpeg".to_vec());
+
+        assert_eq!(live_id(&state), None);
+    }
+
+    #[test]
+    fn live_frame_for_an_old_node_returns_false() {
+        let mut state = live_state();
+        state.set_node(Some(&node(2)), START);
+
+        let current = state.set_live_frame(&node(1), times(START), &mut b"jpeg".to_vec());
+
+        assert!(!current);
+    }
+
+    #[test]
+    fn live_frame_while_live_is_off_changes_nothing() {
+        let mut state = state(Stream::new(START));
+
+        state.set_live_frame(&node(1), times(START), &mut b"jpeg".to_vec());
+
+        assert_eq!(live_id(&state), None);
+    }
+
+    #[test]
+    fn live_frame_while_live_is_off_returns_true() {
+        let mut state = state(Stream::new(START));
+
+        let current = state.set_live_frame(&node(1), times(START), &mut b"jpeg".to_vec());
+
+        assert!(current);
+    }
+
+    #[test]
+    fn end_of_live_drops_the_live_frame() {
+        let mut state = live_state();
+        state.set_live_frame(&node(1), times(START), &mut b"jpeg".to_vec());
+
+        state.set_live(false);
+
+        assert_eq!(live_id(&state), None);
+    }
+
+    #[test]
+    fn new_node_drops_the_live_frame() {
+        let mut state = live_state();
+        state.set_live_frame(&node(1), times(START), &mut b"jpeg".to_vec());
+
+        state.set_node(Some(&node(2)), START);
+
+        assert_eq!(live_id(&state), None);
     }
 }

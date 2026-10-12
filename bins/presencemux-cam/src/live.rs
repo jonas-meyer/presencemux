@@ -89,7 +89,7 @@ fn bytes(count: usize) -> f64 {
     f64::from(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
-/// A requantized frame.
+/// A live frame that [`Requantizer::requantize`] writes into `out`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Live<'a> {
     /// The JPEG data. At [`MIN_QUALITY`] it can be larger than the largest
@@ -109,7 +109,6 @@ pub(crate) struct Requantizer {
     encoder: Encoder,
     parts: Vec<Part>,
     encoded: Vec<Encoded>,
-    out: Vec<u8>,
     quality: Quality,
     max_size: usize,
 }
@@ -122,22 +121,26 @@ impl Requantizer {
             encoder: Encoder::new(QUALITY),
             parts: (0..PARTS).map(|_| Part::new()).collect(),
             encoded: (0..PARTS).map(|_| Encoded::new()).collect(),
-            out: Vec::new(),
             quality: Quality::new(),
             max_size,
         }
     }
 
     /// Returns the quality of the next frame.
-    pub(crate) fn quality(&self) -> u8 {
+    #[cfg(test)]
+    fn quality(&self) -> u8 {
         self.quality.get()
     }
 
-    /// Requantizes the JPEG frame `jpeg`. Lowers the quality until the frame
-    /// has at most `max_size` bytes, or until the quality is at
+    /// Requantizes the JPEG frame `jpeg` into `out`. Lowers the quality until
+    /// the frame has at most `max_size` bytes, or until the quality is at
     /// [`MIN_QUALITY`]. Decodes the frame again in one part if the parts do not
     /// synchronize. Returns an error if the frame does not parse or decode.
-    pub(crate) fn requantize(&mut self, jpeg: &[u8]) -> Result<Live<'_>, Error> {
+    pub(crate) fn requantize<'o>(
+        &mut self,
+        jpeg: &[u8],
+        out: &'o mut Vec<u8>,
+    ) -> Result<Live<'o>, Error> {
         let frame = Frame::parse(jpeg, &mut self.tables)?;
         decode_parts(&frame, &mut self.parts);
         // This join only checks that the parts synchronize.
@@ -154,11 +157,11 @@ impl Requantizer {
             self.encoder.set_quality(quality.get());
             let prepared = self.encoder.prepare(&frame);
             encode_parts(&prepared, &coefficients, encoded);
-            prepared.write(encoded, &mut self.out);
-            if self.out.len() <= self.max_size {
+            prepared.write(encoded, out);
+            if out.len() <= self.max_size {
                 break;
             }
-            let Some(lower) = quality.lowered(self.out.len(), self.max_size) else {
+            let Some(lower) = quality.lowered(out.len(), self.max_size) else {
                 break;
             };
             quality = lower;
@@ -167,10 +170,10 @@ impl Requantizer {
         self.quality = if lowered {
             quality
         } else {
-            quality.raised(self.out.len(), self.max_size)
+            quality.raised(out.len(), self.max_size)
         };
         Ok(Live {
-            jpeg: &self.out,
+            jpeg: out,
             quality: quality.get(),
             one_part,
         })
@@ -245,8 +248,9 @@ mod tests {
     #[test]
     fn color_bars_decode_in_three_parts() {
         let mut requantizer = Requantizer::new(MAX_SIZE);
+        let mut out = Vec::new();
 
-        let live = requantizer.requantize(BARS).unwrap();
+        let live = requantizer.requantize(BARS, &mut out).unwrap();
 
         assert!(!live.one_part);
     }
@@ -254,8 +258,9 @@ mod tests {
     #[test]
     fn color_bars_equal_the_reference_at_quality_80() {
         let mut requantizer = Requantizer::new(MAX_SIZE);
+        let mut out = Vec::new();
 
-        let live = requantizer.requantize(BARS).unwrap();
+        let live = requantizer.requantize(BARS, &mut out).unwrap();
 
         assert_eq!(live.quality, 80);
         assert_eq!(live.jpeg, reference(BARS, 80));
@@ -264,8 +269,9 @@ mod tests {
     #[test]
     fn small_frame_decodes_in_one_part() {
         let mut requantizer = Requantizer::new(MAX_SIZE);
+        let mut out = Vec::new();
 
-        let live = requantizer.requantize(SMALL).unwrap();
+        let live = requantizer.requantize(SMALL, &mut out).unwrap();
 
         assert!(live.one_part);
     }
@@ -273,8 +279,9 @@ mod tests {
     #[test]
     fn small_frame_equals_the_reference_at_quality_80() {
         let mut requantizer = Requantizer::new(MAX_SIZE);
+        let mut out = Vec::new();
 
-        let live = requantizer.requantize(SMALL).unwrap();
+        let live = requantizer.requantize(SMALL, &mut out).unwrap();
 
         assert_eq!(live.jpeg, reference(SMALL, 80));
     }
@@ -283,8 +290,9 @@ mod tests {
     fn frame_over_the_limit_fits_the_limit_at_a_lower_quality() {
         let limit = limit_below_quality_80(BARS);
         let mut requantizer = Requantizer::new(limit);
+        let mut out = Vec::new();
 
-        let live = requantizer.requantize(BARS).unwrap();
+        let live = requantizer.requantize(BARS, &mut out).unwrap();
 
         assert!(live.quality < 80);
         assert!(live.jpeg.len() <= limit);
@@ -293,8 +301,9 @@ mod tests {
     #[test]
     fn frame_over_the_limit_equals_the_reference_at_its_quality() {
         let mut requantizer = Requantizer::new(limit_below_quality_80(BARS));
+        let mut out = Vec::new();
 
-        let live = requantizer.requantize(BARS).unwrap();
+        let live = requantizer.requantize(BARS, &mut out).unwrap();
 
         assert_eq!(live.jpeg, reference(BARS, live.quality));
     }
@@ -302,8 +311,9 @@ mod tests {
     #[test]
     fn next_frame_starts_at_the_quality_of_a_frame_over_the_limit() {
         let mut requantizer = Requantizer::new(limit_below_quality_80(BARS));
+        let mut out = Vec::new();
 
-        let used = requantizer.requantize(BARS).unwrap().quality;
+        let used = requantizer.requantize(BARS, &mut out).unwrap().quality;
 
         assert_eq!(requantizer.quality(), used);
     }
@@ -311,8 +321,9 @@ mod tests {
     #[test]
     fn frame_too_large_at_every_quality_gets_quality_50() {
         let mut requantizer = Requantizer::new(1);
+        let mut out = Vec::new();
 
-        let live = requantizer.requantize(BARS).unwrap();
+        let live = requantizer.requantize(BARS, &mut out).unwrap();
 
         assert_eq!(live.quality, 50);
         assert_eq!(live.jpeg, reference(BARS, 50));
@@ -321,8 +332,9 @@ mod tests {
     #[test]
     fn half_a_frame_gives_an_error() {
         let mut requantizer = Requantizer::new(MAX_SIZE);
+        let mut out = Vec::new();
 
-        let result = requantizer.requantize(&BARS[..BARS.len() / 2]);
+        let result = requantizer.requantize(&BARS[..BARS.len() / 2], &mut out);
 
         assert!(result.is_err());
     }
@@ -330,9 +342,10 @@ mod tests {
     #[test]
     fn frame_after_half_a_frame_equals_the_reference() {
         let mut requantizer = Requantizer::new(MAX_SIZE);
-        let _ = requantizer.requantize(&BARS[..BARS.len() / 2]);
+        let mut out = Vec::new();
+        let _ = requantizer.requantize(&BARS[..BARS.len() / 2], &mut out);
 
-        let live = requantizer.requantize(BARS).unwrap();
+        let live = requantizer.requantize(BARS, &mut out).unwrap();
 
         assert_eq!(live.jpeg, reference(BARS, 80));
     }
@@ -413,10 +426,11 @@ mod tests {
     #[ignore = "needs the saved camera frames in the directory PRESENCEMUX_JPEG_FRAMES"]
     fn saved_camera_frames_decode_in_three_parts() {
         let mut requantizer = Requantizer::new(MAX_SIZE);
+        let mut out = Vec::new();
 
         let failures: Vec<PathBuf> = saved_frames()
             .into_iter()
-            .filter(|(_, jpeg)| requantizer.requantize(jpeg).unwrap().one_part)
+            .filter(|(_, jpeg)| requantizer.requantize(jpeg, &mut out).unwrap().one_part)
             .map(|(path, _)| path)
             .collect();
 
@@ -427,11 +441,12 @@ mod tests {
     #[ignore = "needs the saved camera frames in the directory PRESENCEMUX_JPEG_FRAMES"]
     fn saved_camera_frames_fit_the_limit_at_quality_80() {
         let mut requantizer = Requantizer::new(MAX_SIZE);
+        let mut out = Vec::new();
 
         let failures: Vec<PathBuf> = saved_frames()
             .into_iter()
             .filter(|(_, jpeg)| {
-                let live = requantizer.requantize(jpeg).unwrap();
+                let live = requantizer.requantize(jpeg, &mut out).unwrap();
                 live.quality != 80 || live.jpeg.len() > MAX_SIZE
             })
             .map(|(path, _)| path)

@@ -37,8 +37,7 @@ pub(crate) struct Control {
     pub(crate) camera: CameraStatus,
     /// Whether the host receives a stream.
     pub(crate) streaming: bool,
-    /// The capture time of the newest live frame. The worker does not capture
-    /// live frames yet, and a live lease latches as stalled.
+    /// The capture time of the newest camera frame.
     pub(crate) newest: Option<Duration>,
 }
 

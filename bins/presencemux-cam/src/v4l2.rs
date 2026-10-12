@@ -8,7 +8,7 @@
 
 use std::ffi::CStr;
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::ptr::NonNull;
 use std::time::Duration;
 
@@ -30,7 +30,7 @@ pub(crate) const BUF_FLAG_QUEUED: u32 = 0x0002;
 /// The buffer flag for a buffer that the kernel has sent.
 pub(crate) const BUF_FLAG_DONE: u32 = 0x0004;
 /// The buffer flag for a frame with a transfer error.
-pub(crate) const BUF_FLAG_ERROR: u32 = 0x0040;
+const BUF_FLAG_ERROR: u32 = 0x0040;
 const BUF_FLAG_TIMESTAMP_MASK: u32 = 0xe000;
 const BUF_FLAG_TIMESTAMP_MONOTONIC: u32 = 0x2000;
 /// The largest number of buffers of a V4L2 queue, `VIDEO_MAX_FRAME`.
@@ -500,8 +500,10 @@ impl Mapping {
         }
         // SAFETY: The check above keeps `data.len()` within `len`, and the
         // mapping is writable for `len` bytes until drop. `&mut self` makes
-        // this the only access from this process. `Mapping` returns no slice,
-        // and `data` cannot overlap the mapping.
+        // this the only access from this process. A slice of the mapping from
+        // `Dequeued::data` borrows the `CaptureStream` that owns the mapping.
+        // `&mut self` excludes such a slice, and `data` therefore cannot
+        // overlap the mapping.
         unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), self.ptr.as_ptr(), data.len()) };
         Ok(())
     }
@@ -513,6 +515,129 @@ impl Drop for Mapping {
         // `self`.
         if let Err(error) = unsafe { munmap(self.ptr.as_ptr().cast(), self.len) } {
             tracing::warn!("cannot unmap a buffer: {error}");
+        }
+    }
+}
+
+/// A running capture stream with its mapped buffers. Only this type and
+/// [`Dequeued`] queue the buffers of the stream. Drop unmaps the buffers and closes the node. The
+/// kernel then stops the stream and frees the buffers.
+#[derive(Debug)]
+pub(crate) struct CaptureStream {
+    /// The mapped buffers, in the order of their index.
+    mappings: Vec<Mapping>,
+    fd: OwnedFd,
+}
+
+impl CaptureStream {
+    /// Requests `count` buffers on the capture node `fd`, maps and queues them,
+    /// and starts the stream. Returns an error if the kernel allocates fewer
+    /// than 2 buffers.
+    pub(crate) fn start(fd: OwnedFd, count: u32) -> io::Result<Self> {
+        let borrowed = fd.as_fd();
+        let count = request_buffers(borrowed, Queue::Capture, count)?;
+        if count < 2 {
+            return Err(io::Error::other(format!(
+                "the kernel allocated only {count} buffers"
+            )));
+        }
+        let mut mappings = Vec::new();
+        for index in 0..count {
+            let buffer = query_buffer(borrowed, Queue::Capture, index)?
+                .ok_or_else(|| io::Error::other(format!("buffer {index} does not exist")))?;
+            mappings.push(Mapping::new(borrowed, &buffer)?);
+            queue_buffer(borrowed, Queue::Capture, index, 0)?;
+        }
+        stream_on(borrowed, Queue::Capture)?;
+        Ok(Self { mappings, fd })
+    }
+
+    /// Returns a filled buffer, or `None` if no buffer is ready.
+    pub(crate) fn dequeue(&self) -> io::Result<Option<Dequeued<'_>>> {
+        let Some(buffer) = dequeue_buffer(self.fd.as_fd(), Queue::Capture)? else {
+            return Ok(None);
+        };
+        if self.mapping(buffer.index).is_none() {
+            return Err(io::Error::other(format!(
+                "the kernel filled the unknown buffer {}",
+                buffer.index
+            )));
+        }
+        Ok(Some(Dequeued {
+            stream: self,
+            buffer,
+            queued: false,
+        }))
+    }
+
+    fn mapping(&self, index: u32) -> Option<&Mapping> {
+        self.mappings.get(usize::try_from(index).ok()?)
+    }
+}
+
+impl AsFd for CaptureStream {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
+/// A filled capture buffer that the process holds. The kernel does not write
+/// the buffer until [`Dequeued::requeue`] or drop queues it again.
+#[derive(Debug)]
+pub(crate) struct Dequeued<'a> {
+    stream: &'a CaptureStream,
+    buffer: Buffer,
+    /// Whether `requeue` queued the buffer.
+    queued: bool,
+}
+
+impl Dequeued<'_> {
+    /// Returns whether the frame has a transfer error.
+    pub(crate) fn has_error(&self) -> bool {
+        self.buffer.flags & BUF_FLAG_ERROR != 0
+    }
+
+    /// Returns the `CLOCK_MONOTONIC` time of the frame, or `None` if the driver
+    /// uses another clock.
+    pub(crate) fn monotonic_time(&self) -> Option<Duration> {
+        self.buffer.monotonic_time()
+    }
+
+    /// Returns the data of the frame.
+    pub(crate) fn data(&self) -> io::Result<&[u8]> {
+        let mapping = self
+            .stream
+            .mapping(self.buffer.index)
+            .ok_or_else(|| io::Error::other("the buffer has no mapping"))?;
+        let len = usize::try_from(self.buffer.bytes_used).map_err(io::Error::other)?;
+        if len > mapping.len {
+            return Err(io::Error::other("the frame is larger than the buffer"));
+        }
+        // SAFETY: The mapping is readable for `mapping.len` bytes until drop,
+        // and the check above keeps `len` at most `mapping.len`. The slice
+        // borrows `self`, and `self` borrows the stream that owns the mapping.
+        // In this crate, only `CaptureStream` and `Dequeued` queue a buffer of
+        // the stream. Other code uses the fd of the stream only for `poll`.
+        // The buffer stays out of the queue until `requeue` or drop. The
+        // kernel writes a capture buffer only while it is in the queue.
+        Ok(unsafe { core::slice::from_raw_parts(mapping.ptr.as_ptr(), len) })
+    }
+
+    /// Queues the buffer again.
+    pub(crate) fn requeue(mut self) -> io::Result<()> {
+        self.queued = true;
+        queue_buffer(self.stream.as_fd(), Queue::Capture, self.buffer.index, 0)
+    }
+}
+
+impl Drop for Dequeued<'_> {
+    fn drop(&mut self) {
+        if self.queued {
+            return;
+        }
+        let result = queue_buffer(self.stream.as_fd(), Queue::Capture, self.buffer.index, 0);
+        if let Err(error) = result {
+            tracing::warn!("cannot queue a capture buffer again: {error}");
         }
     }
 }

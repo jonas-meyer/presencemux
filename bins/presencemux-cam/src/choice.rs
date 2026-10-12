@@ -194,7 +194,7 @@ impl Choice {
     }
 
     /// Checks the lease and the frames at the time `now`. `newest` is the
-    /// capture time of the newest live frame. Latches the worker if the last
+    /// capture time of the newest camera frame. Latches the worker if the last
     /// lease expired, or if a live lease had no fresh frame for [`FRESH`].
     /// Returns the new latch, if the worker latched now.
     pub(crate) fn check(&mut self, now: Duration, newest: Option<Duration>) -> Option<Latch> {
@@ -216,7 +216,7 @@ impl Choice {
     }
 
     /// Returns the frame at the time `now`. `newest` is the capture time of the
-    /// newest live frame.
+    /// newest camera frame.
     pub(crate) fn shown(&self, now: Duration, newest: Option<Duration>) -> Shown<'_> {
         let permission = self.lease(now).map(|lease| &lease.permission);
         decide(permission, self.latch.is_some(), is_fresh(now, newest))
@@ -243,7 +243,7 @@ impl Choice {
 
 /// Returns whether a frame with the capture time `newest` is younger than
 /// [`FRESH`] at the time `now`. A capture time after `now` is not fresh.
-fn is_fresh(now: Duration, newest: Option<Duration>) -> bool {
+pub(crate) fn is_fresh(now: Duration, newest: Option<Duration>) -> bool {
     newest
         .and_then(|newest| now.checked_sub(newest))
         .is_some_and(|age| age < FRESH)

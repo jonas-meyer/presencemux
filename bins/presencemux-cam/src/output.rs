@@ -12,7 +12,7 @@ const BUFFERS: u32 = 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FrameId(pub(crate) u64);
 
-/// A JPEG frame to send.
+/// A JPEG frame to queue.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Frame<'a> {
     pub(crate) id: FrameId,
@@ -90,14 +90,14 @@ impl Output {
     }
 
     /// Queues the frame in a buffer that the kernel does not hold. Does nothing
-    /// if the kernel holds every buffer.
-    pub(crate) fn send(&mut self, fd: BorrowedFd<'_>, frame: Frame<'_>) -> io::Result<()> {
+    /// if the kernel holds every buffer. Returns whether it queued the frame.
+    pub(crate) fn queue(&mut self, fd: BorrowedFd<'_>, frame: Frame<'_>) -> io::Result<bool> {
         let free = |slot: &Slot| !slot.in_kernel;
         let position = (self.slots.iter())
             .position(|slot| free(slot) && slot.frame == Some(frame.id))
             .or_else(|| self.slots.iter().position(free));
         let Some(slot) = position.map(|position| &mut self.slots[position]) else {
-            return Ok(());
+            return Ok(false);
         };
         if slot.frame != Some(frame.id) {
             slot.frame = None;
@@ -107,7 +107,7 @@ impl Output {
         let bytes_used = u32::try_from(frame.jpeg.len()).map_err(io::Error::other)?;
         v4l2::queue_buffer(fd, Queue::Output, slot.index, bytes_used)?;
         slot.in_kernel = true;
-        Ok(())
+        Ok(true)
     }
 
     /// Stops the stream and frees the buffers.
