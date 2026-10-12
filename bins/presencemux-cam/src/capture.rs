@@ -28,7 +28,7 @@ use crate::{HEIGHT, WIDTH};
 const BUFFERS: u32 = 4;
 /// The frame time that the thread requests, in seconds, as a fraction. The
 /// driver chooses the nearest frame time of the camera.
-const FRAME_TIME: (u32, u32) = (1, 30);
+const FRAME_TIME: (u32, u32) = (1, 60);
 /// The largest age of the newest frame of a ready camera.
 const FRESH: Duration = Duration::from_millis(500);
 /// The longest time without a frame. A longer time gives `Fault`, and the
