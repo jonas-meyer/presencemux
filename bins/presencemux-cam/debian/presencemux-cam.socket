@@ -1,0 +1,13 @@
+[Unit]
+Description=PresenceMux cam worker socket
+Documentation=https://github.com/jonas-meyer/presencemux
+
+[Socket]
+ListenStream=/run/presencemux/io.presencemux.Cam
+FileDescriptorName=varlink
+SocketUser=_presencemux-cam
+SocketGroup=_presencemux
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target

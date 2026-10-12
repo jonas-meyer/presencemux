@@ -756,11 +756,14 @@ dependencies = [
 name = "presencemux-cam"
 version = "0.1.0"
 dependencies = [
+ "expect-test",
  "insta",
+ "presencemux-api",
  "presencemux-jpeg",
  "proptest",
  "rustix",
  "sd-notify",
+ "serde",
  "thiserror",
  "tokio",
  "tracing",
@@ -768,6 +771,7 @@ dependencies = [
  "tracing-subscriber",
  "udev",
  "zerocopy",
+ "zlink",
 ]
 
 [[package]]

@@ -12,6 +12,8 @@ use sd_notify::NotifyState;
 
 /// The name of the gadget node in the fd store.
 pub(crate) const UVC_FD_NAME: &str = "uvc";
+/// The name of the Varlink socket in `presencemux-cam.socket`.
+pub(crate) const VARLINK_FD_NAME: &str = "varlink";
 
 /// Takes the fds that systemd passes to the service, by name. A second call
 /// returns no fds.

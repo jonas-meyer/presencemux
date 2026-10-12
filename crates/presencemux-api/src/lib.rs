@@ -1,4 +1,7 @@
-//! The Varlink API of presencemuxd, shared by the daemon and its clients.
+//! The Varlink APIs of presencemuxd and the cam worker. The module [`cam`]
+//! holds the API of the cam worker.
+
+pub mod cam;
 
 use std::fmt;
 

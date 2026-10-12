@@ -2,20 +2,13 @@
 //! host through the UVC gadget function.
 
 mod capture;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only the tests use frame choice until the lease exists"
-    )
-)]
 mod choice;
 mod discovery;
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "only the tests use the requantizer until frame choice and the lease exist"
+        reason = "only the tests use the requantizer until the worker sends live frames"
     )
 )]
 mod live;
@@ -23,21 +16,30 @@ mod output;
 mod systemd;
 mod uvc;
 mod v4l2;
+mod varlink;
 
+use std::cell::RefCell;
+use std::convert::Infallible;
+use std::future::pending;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::time::Duration;
 
 use rustix::fs::{Mode, OFlags};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{Interest, Ready};
+use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
+
+use presencemux_api::cam::DeviceStatus;
 
 use crate::capture::{CameraStatus, Capture};
 use crate::discovery::Discovery;
@@ -45,6 +47,7 @@ use crate::output::{Frame, FrameId, Output};
 use crate::systemd::Watchdog;
 use crate::uvc::{Action, Input, Limits, Uvc};
 use crate::v4l2::Queue;
+use crate::varlink::{Control, Service, Shared};
 
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
@@ -81,6 +84,8 @@ enum Error {
     Events(io::Error),
     #[error("cannot register the signal handlers: {0}")]
     Signal(io::Error),
+    #[error("cannot serve the Varlink socket: {0}")]
+    Varlink(io::Error),
 }
 
 #[tokio::main(flavor = "local")]
@@ -105,6 +110,18 @@ async fn run() -> Result<(), Error> {
     capture.set_node(discovery.nodes().camera());
 
     let mut fds = systemd::passed_fds().map_err(Error::FdStore)?;
+    let control: Shared = Rc::new(RefCell::new(Control::new()));
+    let mut varlink = None;
+    if let Some(fd) = fds.remove(systemd::VARLINK_FD_NAME) {
+        let service = Service::new(Rc::clone(&control));
+        let listener = listener(fd).map_err(Error::Varlink)?;
+        let socket_gid = socket_gid();
+        varlink = Some(tokio::task::spawn_local(varlink::serve(
+            listener, service, socket_gid,
+        )));
+    } else {
+        tracing::info!("systemd passed no Varlink socket, the worker sends blank");
+    }
     let stored = fds.remove(systemd::UVC_FD_NAME);
     let adopted = stored.is_some();
     let node = if let Some(node) = stored {
@@ -169,12 +186,13 @@ async fn run() -> Result<(), Error> {
                 changed.map_err(Error::Discovery)?;
                 capture.set_node(discovery.nodes().camera());
             }
+            error = failure(&mut varlink) => return Err(Error::Varlink(error)),
             _ = frames.tick() => {
                 if capture.has_ended() {
                     return Err(Error::CaptureEnded);
                 }
+                worker.update(&control, &capture);
                 worker.send_frame(node.get_ref().as_fd());
-                worker.check_camera(&capture);
                 watchdog.ping();
             }
         }
@@ -276,12 +294,26 @@ impl Worker {
         }
     }
 
-    /// Updates the status of the camera, and logs a change.
-    fn check_camera(&mut self, capture: &Capture) {
-        let status = capture.status(v4l2::monotonic_now());
+    /// Updates the camera status and the shared state, and checks the lease and
+    /// the frames. Logs a change of the camera and a new latch.
+    fn update(&mut self, control: &Shared, capture: &Capture) {
+        let now = v4l2::monotonic_now();
+        let status = capture.status(now);
         if status != self.camera {
             tracing::info!("camera: {status}");
             self.camera = status;
+        }
+        let mut control = control.borrow_mut();
+        control.camera = self.camera;
+        control.streaming = self.output.is_some();
+        control.worker = if self.start_pending {
+            DeviceStatus::Fault
+        } else {
+            DeviceStatus::Ready
+        };
+        let newest = control.newest;
+        if let Some(latch) = control.choice.check(now, newest) {
+            tracing::info!("latched: {}, epoch {}", latch.reason, latch.grant.epoch);
         }
     }
 
@@ -291,6 +323,40 @@ impl Worker {
             tracing::warn!("{message}");
             self.frame_error = Some(message.to_owned());
         }
+    }
+}
+
+/// Returns the Varlink socket in `fd` as a listener of the runtime.
+fn listener(fd: OwnedFd) -> io::Result<UnixListener> {
+    let listener = std::os::unix::net::UnixListener::from(fd);
+    listener.set_nonblocking(true)?;
+    UnixListener::from_std(listener)
+}
+
+/// Returns the group of the Varlink socket file, or `None` if the worker cannot
+/// read it.
+fn socket_gid() -> Option<u32> {
+    match rustix::fs::stat(presencemux_api::cam::SOCKET_PATH) {
+        Ok(stat) => Some(stat.st_gid),
+        Err(error) => {
+            tracing::warn!(
+                "cannot read the group of {}, the worker serves root: {error}",
+                presencemux_api::cam::SOCKET_PATH
+            );
+            None
+        }
+    }
+}
+
+/// Returns the error of the Varlink task when it ends. Waits forever without
+/// a task.
+async fn failure(task: &mut Option<JoinHandle<io::Result<Infallible>>>) -> io::Error {
+    let Some(task) = task else {
+        return pending().await;
+    };
+    match task.await {
+        Ok(Err(error)) => error,
+        Err(error) => io::Error::other(error),
     }
 }
 

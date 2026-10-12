@@ -2,6 +2,7 @@
 //!
 //! Times are `CLOCK_MONOTONIC`. The choice has no I/O and no clock of its own.
 
+use std::fmt;
 use std::time::Duration;
 
 /// The longest time from now to the expiry time of a lease.
@@ -61,6 +62,16 @@ pub(crate) enum Reason {
     Started,
 }
 
+impl fmt::Display for Reason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Expired => "expired",
+            Self::Stalled => "stalled",
+            Self::Started => "started",
+        })
+    }
+}
+
 /// A block of live video until a lease with a newer grant arrives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Latch {
@@ -82,6 +93,18 @@ pub(crate) enum Rejection {
     OldEpoch,
     /// The lease has the grant of the last lease and a higher permission.
     Raised,
+}
+
+impl fmt::Display for Rejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Late => "late",
+            Self::TooLong => "too long",
+            Self::OldSession => "old session",
+            Self::OldEpoch => "old epoch",
+            Self::Raised => "raised",
+        })
+    }
 }
 
 /// The frame that the worker sends.
@@ -112,9 +135,12 @@ impl Choice {
         self.latch
     }
 
-    /// Returns the last accepted lease, if it did not expire.
-    pub(crate) fn lease(&self) -> Option<&Lease> {
-        self.last.as_ref().filter(|_| !self.expired)
+    /// Returns the last accepted lease, if it does not expire at or before
+    /// `now`.
+    pub(crate) fn lease(&self, now: Duration) -> Option<&Lease> {
+        self.last
+            .as_ref()
+            .filter(|lease| !self.expired && lease.until > now)
     }
 
     /// Checks `lease` at the time `now`, and accepts it or returns the
@@ -175,7 +201,7 @@ impl Choice {
         if self.expire(now) {
             return self.latch;
         }
-        let lease = self.lease()?;
+        let lease = self.lease(now)?;
         let stalled = lease.permission == Permission::Live
             && self.latch.is_none()
             && !is_fresh(now, newest.max(self.live_since));
@@ -192,10 +218,7 @@ impl Choice {
     /// Returns the frame at the time `now`. `newest` is the capture time of the
     /// newest live frame.
     pub(crate) fn shown(&self, now: Duration, newest: Option<Duration>) -> Shown<'_> {
-        let permission = self
-            .lease()
-            .filter(|lease| lease.until > now)
-            .map(|lease| &lease.permission);
+        let permission = self.lease(now).map(|lease| &lease.permission);
         decide(permission, self.latch.is_some(), is_fresh(now, newest))
     }
 
@@ -227,7 +250,7 @@ fn is_fresh(now: Duration, newest: Option<Duration>) -> bool {
 }
 
 /// Returns the frame for `permission`, `latched` and `fresh`. `permission` is
-/// `None` without a valid lease.
+/// `None` without a lease, or after its expiry.
 fn decide(permission: Option<&Permission>, latched: bool, fresh: bool) -> Shown<'_> {
     match permission {
         Some(Permission::Live) if !latched && fresh => Shown::Live,
@@ -567,10 +590,17 @@ mod tests {
     }
 
     #[test]
-    fn expired_lease_is_not_the_current_lease() {
+    fn expired_lease_is_not_the_accepted_lease() {
         let choice = expired_choice();
 
-        assert_eq!(choice.lease(), None);
+        assert_eq!(choice.lease(NOW + LEASE), None);
+    }
+
+    #[test]
+    fn lease_at_its_expiry_time_is_not_the_accepted_lease() {
+        let choice = live_choice();
+
+        assert_eq!(choice.lease(NOW + LEASE), None);
     }
 
     #[test]

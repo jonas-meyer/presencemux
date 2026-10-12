@@ -16,7 +16,7 @@ the requests of the host on the UVC gadget node. It sends frames to the host: \
 live video, a slate or blank. The worker keeps the gadget node in the systemd \
 fd store. The host then stays connected when the worker restarts."""
 section = "video"
-depends = "$auto, systemd (>= 257), presencemux-gadget"
+depends = "$auto, systemd (>= 257), presencemux-gadget, presencemuxd"
 maintainer-scripts = "debian/"
 assets = [
     ["target/release/presencemux-cam", "usr/bin/", "755"],
@@ -25,9 +25,11 @@ assets = [
 systemd-units = { enable = true, start = true }
 
 [dependencies]
+presencemux-api.workspace = true
 presencemux-jpeg.workspace = true
 rustix = { workspace = true, features = ["event", "fs", "mm", "time"] }
 sd-notify = { workspace = true, features = ["fdstore"] }
+serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "time"] }
 tracing.workspace = true
@@ -35,10 +37,14 @@ tracing-journald.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 udev.workspace = true
 zerocopy.workspace = true
+zlink = { workspace = true, features = ["service"] }
 
 [dev-dependencies]
+expect-test.workspace = true
 insta.workspace = true
 proptest.workspace = true
+rustix = { workspace = true, features = ["process"] }
+zlink = { workspace = true, features = ["idl-parse", "proxy"] }
 
 [lints]
 workspace = true

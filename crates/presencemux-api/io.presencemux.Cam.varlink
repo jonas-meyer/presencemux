@@ -1,0 +1,75 @@
+#  Sets the frame that the cam worker sends to the host: live video, a slate
+#  or blank.
+interface io.presencemux.Cam
+
+#  A permission for the cam worker that expires at a fixed time. Times are
+#  `CLOCK_MONOTONIC` in microseconds.
+type Lease (#  The start time of the daemon run that sends the lease.
+sessionUSec: int, #  The number of the user command that gave the permission.
+epoch: int, permission: Permission, #  The name of the slate in `config.toml`. Only a `slate` permission has a
+#  name.
+slate: ?string, #  The time at which the lease expires.
+untilUSec: int)
+
+#  A frame that a lease permits.
+type Permission (blank, slate, live)
+
+#  The state of the cam worker, in the reply to each call.
+type Report (#  The state of the cam worker and its gadget node.
+worker: DeviceStatus, #  The state of the camera.
+camera: DeviceStatus, #  The latch, if the cam worker is latched.
+latched: ?Latch, #  Why the cam worker rejected the lease of this call. Null after an
+#  accepted lease and in `Describe`.
+rejected: ?Rejection, #  The frame that the cam worker sends.
+shown: Shown, #  Whether the host receives a stream.
+host: HostStream, #  A message for the logs, for example about an unknown slate.
+detail: ?string)
+
+#  The state of the cam worker or the camera.
+type DeviceStatus (missing, initializing, ready, fault)
+
+#  A block of live video until a lease with a newer grant arrives.
+type Latch (#  The session of the lease at the time of the latch.
+sessionUSec: int, #  The epoch of the lease at the time of the latch.
+epoch: int, reason: LatchReason)
+
+#  The reason for a latch.
+type LatchReason (
+	#  The lease expired before the next lease arrived.
+	expired,
+	#  A live lease had no frame younger than 500 ms.
+	stalled,
+	#  The cam worker started. Its first lease latches it.
+	started
+)
+
+#  The reason for the rejection of a lease.
+type Rejection (
+	#  The lease expires at or before now.
+	late,
+	#  The lease expires more than 2 s after now.
+	too_long,
+	#  The lease comes from an older daemon run than the last lease.
+	old_session,
+	#  The lease has an older epoch than the last lease of its session.
+	old_epoch,
+	#  The lease has the grant of the last lease and a higher permission.
+	raised
+)
+
+#  The frame that the cam worker sends.
+type Shown (blank, slate, live)
+
+#  Whether the host receives a stream.
+type HostStream (idle, streaming)
+
+#  Accepts or rejects a lease, and returns the report.
+method Renew(lease: Lease) -> (report: Report)
+
+#  Returns the last accepted lease that did not expire, and the report.
+method Describe() -> (#  The last accepted lease. Null if it expired or if no lease arrived.
+lease: ?Lease, report: Report)
+
+#  The lease has a time or an epoch out of range, or a slate name that does
+#  not match its permission.
+error InvalidLease ()
