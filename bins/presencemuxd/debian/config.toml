@@ -1,12 +1,13 @@
 # /etc/presencemux/config.toml
 
 [slates.still-here]
-text = "Still here"
+file = "/usr/share/presencemux-cam/slates/still-here.jpg"
 
 [slates.brb]
-text = "Be right back"
+file = "/usr/share/presencemux-cam/slates/brb.jpg"
 
 [slates.away]
+file = "/usr/share/presencemux-cam/slates/away.jpg"
 
 [presets.live]
 cam = "live"

@@ -18,6 +18,7 @@ use zlink::{Connection, Listener, Server};
 
 use crate::capture::CameraStatus;
 use crate::choice::{self, Choice};
+use crate::slate::Slates;
 use crate::v4l2::monotonic_now;
 
 /// The lease, the latch and the reported state, shared by the event loop and
@@ -39,23 +40,26 @@ pub(crate) struct Control {
     pub(crate) streaming: bool,
     /// The capture time of the newest camera frame.
     pub(crate) newest: Option<Duration>,
+    /// The slates of the configuration.
+    slates: Rc<Slates>,
 }
 
 impl Control {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(slates: Rc<Slates>) -> Self {
         Self {
             choice: Choice::default(),
             worker: DeviceStatus::Missing,
             camera: CameraStatus::Missing,
             streaming: false,
             newest: None,
+            slates,
         }
     }
 
     /// Returns the report at the time `now`. `rejected` is the rejection of the
     /// lease in this call.
     fn report(&self, now: Duration, rejected: Option<choice::Rejection>) -> Report {
-        let (shown, detail) = frame(self.choice.shown(now, self.newest));
+        let (shown, detail) = frame(self.choice.shown(now, self.newest), &self.slates);
         Report {
             worker: self.worker,
             camera: self.camera.into(),
@@ -109,12 +113,16 @@ impl From<choice::Rejection> for Rejection {
 }
 
 /// Returns the frame that the worker sends for `shown`, and a detail for the
-/// report. The worker has no slates yet, and sends blank for each slate.
-fn frame(shown: choice::Shown<'_>) -> (Shown, Option<String>) {
+/// report. A slate without valid frames gives blank, and the detail names the
+/// error.
+fn frame(shown: choice::Shown<'_>, slates: &Slates) -> (Shown, Option<String>) {
     match shown {
         choice::Shown::Blank => (Shown::Blank, None),
         choice::Shown::Live => (Shown::Live, None),
-        choice::Shown::Slate(name) => (Shown::Blank, Some(format!("no slate named {name}"))),
+        choice::Shown::Slate(name) => match slates.get(name) {
+            Ok(_) => (Shown::Slate, None),
+            Err(error) => (Shown::Blank, Some(error.to_string())),
+        },
     }
 }
 
@@ -355,7 +363,7 @@ mod tests {
     /// Connects a client to a new service through a socket pair. The socket
     /// file has the group `socket_gid`.
     fn connect_with(socket_gid: Option<u32>) -> (Client, Shared) {
-        let control: Shared = Rc::new(RefCell::new(Control::new()));
+        let control: Shared = Rc::new(RefCell::new(Control::new(Rc::default())));
         let (server, client) = UnixStream::pair().unwrap();
         let service = Service::new(Rc::clone(&control));
         spawn_local(serve_connection(server, service, socket_gid));
@@ -464,6 +472,30 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, Err(Error::InvalidLease));
+    }
+
+    #[test]
+    fn valid_slate_shows_the_slate_without_a_detail() {
+        let slates = Slates::with_slate("away", include_bytes!("../assets/slates/away.jpg"));
+
+        let shown = frame(choice::Shown::Slate("away"), &slates);
+
+        assert_eq!(shown, (Shown::Slate, None));
+    }
+
+    #[test]
+    fn invalid_slate_shows_blank_with_its_error() {
+        let slates = Slates::with_error("away", "the file is empty");
+
+        let shown = frame(choice::Shown::Slate("away"), &slates);
+
+        assert_eq!(
+            shown,
+            (
+                Shown::Blank,
+                Some("slate away: the file is empty".to_owned())
+            )
+        );
     }
 
     #[tokio::test(flavor = "local")]

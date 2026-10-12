@@ -3,10 +3,12 @@
 
 mod capture;
 mod choice;
+mod config;
 mod delay;
 mod discovery;
 mod live;
 mod output;
+mod slate;
 mod systemd;
 mod uvc;
 mod v4l2;
@@ -40,6 +42,7 @@ use crate::choice::Shown;
 use crate::delay::Delays;
 use crate::discovery::Discovery;
 use crate::output::{Frame, FrameId, Output};
+use crate::slate::Slates;
 use crate::systemd::Watchdog;
 use crate::uvc::{Action, Input, Limits, Uvc};
 use crate::v4l2::Queue;
@@ -103,6 +106,7 @@ async fn main() -> ExitCode {
 async fn run() -> Result<(), Error> {
     let mut terminate = signal(SignalKind::terminate()).map_err(Error::Signal)?;
     let mut interrupt = signal(SignalKind::interrupt()).map_err(Error::Signal)?;
+    let slates = Rc::new(load_slates());
     systemd::ready();
     let mut watchdog = Watchdog::new();
     let mut discovery = Discovery::new().map_err(Error::Discovery)?;
@@ -110,7 +114,7 @@ async fn run() -> Result<(), Error> {
     capture.set_node(discovery.nodes().camera());
 
     let mut fds = systemd::passed_fds().map_err(Error::FdStore)?;
-    let control: Shared = Rc::new(RefCell::new(Control::new()));
+    let control: Shared = Rc::new(RefCell::new(Control::new(Rc::clone(&slates))));
     let mut varlink = None;
     if let Some(fd) = fds.remove(systemd::VARLINK_FD_NAME) {
         let service = Service::new(Rc::clone(&control));
@@ -162,6 +166,8 @@ async fn run() -> Result<(), Error> {
         camera: capture.status(v4l2::monotonic_now()),
         live_queued: None,
         delays: Delays::default(),
+        slates,
+        slate_loop: SlateLoop::default(),
     };
     tracing::info!(
         "presencemux-cam started, adopted: {adopted}, streaming: {}, camera: {}",
@@ -224,6 +230,10 @@ struct Worker {
     live_queued: Option<FrameId>,
     /// The delays of the live frames.
     delays: Delays,
+    /// The slates of the configuration.
+    slates: Rc<Slates>,
+    /// The position in the frames of the shown slate.
+    slate_loop: SlateLoop,
 }
 
 impl Worker {
@@ -315,10 +325,26 @@ impl Worker {
         let shown = control.choice.shown(now, control.newest);
         let live_queued = &mut self.live_queued;
         let delays = &mut self.delays;
+        let slates = &self.slates;
+        let slate_loop = &mut self.slate_loop;
         let result = capture.with_live_frame(|live| {
+            slate_loop.observe(shown);
             match next_frame(shown, live, *live_queued, now, trigger) {
                 Next::Nothing => Ok(()),
                 Next::Blank => output.queue(fd, BLANK).map(drop),
+                Next::Slate(name) => match slates.get(name) {
+                    Ok(slate) => {
+                        match output.queue(fd, slate.frame(slate_loop.index(slate.id()))) {
+                            Ok(true) => {
+                                slate_loop.advance(slate.len());
+                                Ok(())
+                            }
+                            Ok(false) => Ok(()),
+                            Err(error) => output.queue(fd, BLANK).and(Err(error)),
+                        }
+                    }
+                    Err(_) => output.queue(fd, BLANK).map(drop),
+                },
                 Next::Live(live) => match output.queue(fd, live.frame) {
                     Ok(false) => Ok(()),
                     Ok(true) => {
@@ -388,6 +414,8 @@ enum Trigger {
 enum Next<'a> {
     /// The blank frame.
     Blank,
+    /// The next frame of the slate with this name.
+    Slate(&'a str),
     /// The newest live frame.
     Live(LiveFrame<'a>),
     /// No frame. The host shows the last frame again.
@@ -398,7 +426,7 @@ enum Next<'a> {
 /// frame `shown` of frame choice and the event `trigger`. `live` is the newest
 /// live frame, and `live_queued` the last live frame that the worker queued.
 fn next_frame<'a>(
-    shown: Shown<'_>,
+    shown: Shown<'a>,
     live: Option<LiveFrame<'a>>,
     live_queued: Option<FrameId>,
     now: Duration,
@@ -408,8 +436,63 @@ fn next_frame<'a>(
     match (shown, fresh) {
         (Shown::Live, Some(live)) if live_queued == Some(live.frame.id) => Next::Nothing,
         (Shown::Live, Some(live)) => Next::Live(live),
+        (Shown::Slate(name), _) if trigger == Trigger::Timer => Next::Slate(name),
         _ if trigger == Trigger::Timer => Next::Blank,
         _ => Next::Nothing,
+    }
+}
+
+/// The position in the frames of the shown slate. A slate starts at its first
+/// frame each time frame choice shows it.
+#[derive(Debug, Default)]
+struct SlateLoop {
+    /// The identity of the shown slate. `None` while frame choice shows no
+    /// slate.
+    slate: Option<u64>,
+    /// The index of the next frame.
+    next: usize,
+}
+
+impl SlateLoop {
+    /// Resets the loop if frame choice does not show a slate.
+    fn observe(&mut self, shown: Shown<'_>) {
+        if !matches!(shown, Shown::Slate(_)) {
+            self.reset();
+        }
+    }
+
+    /// Returns the index of the next frame of the slate with the identity
+    /// `slate`. Starts at the first frame for a new slate.
+    fn index(&mut self, slate: u64) -> usize {
+        if self.slate != Some(slate) {
+            self.slate = Some(slate);
+            self.next = 0;
+        }
+        self.next
+    }
+
+    /// Moves to the next frame of a slate with `len` frames. Returns to the
+    /// first frame after the last frame.
+    fn advance(&mut self, len: usize) {
+        self.next = (self.next + 1) % len;
+    }
+
+    /// Resets the loop. The next shown slate starts at its first frame.
+    fn reset(&mut self) {
+        self.slate = None;
+        self.next = 0;
+    }
+}
+
+/// Returns the slates of the configuration file. Without a valid
+/// configuration file, returns no slates.
+fn load_slates() -> Slates {
+    match config::slate_files(Path::new(config::CONFIG)) {
+        Ok(files) => Slates::load(&files),
+        Err(error) => {
+            tracing::warn!("{error}, the worker has no slates");
+            Slates::default()
+        }
     }
 }
 
@@ -565,7 +648,7 @@ mod tests {
     fn live_id(next: Next<'_>) -> Option<FrameId> {
         match next {
             Next::Live(live) => Some(live.frame.id),
-            Next::Blank | Next::Nothing => None,
+            Next::Blank | Next::Slate(_) | Next::Nothing => None,
         }
     }
 
@@ -670,10 +753,79 @@ mod tests {
     }
 
     #[test]
-    fn slate_gives_blank_on_the_frame_timer() {
+    fn slate_gives_the_slate_on_the_frame_timer() {
         let next = next_frame(Shown::Slate("away"), None, None, NOW, Trigger::Timer);
 
-        assert!(matches!(next, Next::Blank));
+        assert!(matches!(next, Next::Slate("away")));
+    }
+
+    #[test]
+    fn slate_gives_nothing_on_a_live_frame_event() {
+        let next = next_frame(Shown::Slate("away"), None, None, NOW, Trigger::LiveFrame);
+
+        assert!(matches!(next, Next::Nothing));
+    }
+
+    /// The identities of two slates in the tests.
+    const AWAY: u64 = 1 << 63;
+    const BRB: u64 = (1 << 63) | (1 << 32);
+
+    #[test]
+    fn new_slate_starts_at_its_first_frame() {
+        let mut slate_loop = SlateLoop::default();
+        slate_loop.index(BRB);
+        slate_loop.advance(3);
+
+        let index = slate_loop.index(AWAY);
+
+        assert_eq!(index, 0);
+    }
+
+    #[test]
+    fn same_slate_continues_at_its_next_frame() {
+        let mut slate_loop = SlateLoop::default();
+        slate_loop.index(AWAY);
+        slate_loop.advance(3);
+
+        let index = slate_loop.index(AWAY);
+
+        assert_eq!(index, 1);
+    }
+
+    #[test]
+    fn loop_returns_to_its_first_frame_after_its_last_frame() {
+        let mut slate_loop = SlateLoop::default();
+        slate_loop.index(AWAY);
+        slate_loop.advance(2);
+        slate_loop.advance(2);
+
+        let index = slate_loop.index(AWAY);
+
+        assert_eq!(index, 0);
+    }
+
+    #[test]
+    fn slate_shown_again_after_blank_starts_at_its_first_frame() {
+        let mut slate_loop = SlateLoop::default();
+        slate_loop.index(AWAY);
+        slate_loop.advance(3);
+        slate_loop.observe(Shown::Blank);
+
+        let index = slate_loop.index(AWAY);
+
+        assert_eq!(index, 0);
+    }
+
+    #[test]
+    fn shown_slate_keeps_the_position_of_its_loop() {
+        let mut slate_loop = SlateLoop::default();
+        slate_loop.index(AWAY);
+        slate_loop.advance(3);
+        slate_loop.observe(Shown::Slate("away"));
+
+        let index = slate_loop.index(AWAY);
+
+        assert_eq!(index, 1);
     }
 
     #[test]
