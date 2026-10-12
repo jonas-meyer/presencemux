@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+# Masks the user instances of PipeWire and WirePlumber.
+if [ "$1" = "configure" ]; then
+    systemctl --global mask pipewire.socket pipewire.service wireplumber.service filter-chain.service >/dev/null
+fi
+
+#DEBHELPER#

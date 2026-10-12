@@ -753,6 +753,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "presencemux-audio"
+version = "0.1.0"
+
+[[package]]
 name = "presencemux-cam"
 version = "0.1.0"
 dependencies = [

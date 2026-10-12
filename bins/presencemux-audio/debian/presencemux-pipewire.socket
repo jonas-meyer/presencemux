@@ -1,0 +1,11 @@
+[Unit]
+Description=PipeWire system socket of PresenceMux
+
+[Socket]
+ListenStream=/run/pipewire/pipewire-0
+SocketUser=pipewire
+SocketGroup=pipewire
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target

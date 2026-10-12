@@ -1,0 +1,38 @@
+[Unit]
+Description=WirePlumber system session manager of PresenceMux
+Documentation=https://github.com/jonas-meyer/presencemux
+BindsTo=presencemux-pipewire.service
+After=presencemux-pipewire.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wireplumber -p main-embedded
+User=pipewire
+SupplementaryGroups=audio
+Environment=PIPEWIRE_RUNTIME_DIR=/run/pipewire
+Environment=GIO_USE_VFS=local
+Restart=always
+RestartSec=1s
+AmbientCapabilities=CAP_SYS_NICE
+CapabilityBoundingSet=CAP_SYS_NICE
+
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+UMask=0077
+
+[Install]
+WantedBy=presencemux-pipewire.service
