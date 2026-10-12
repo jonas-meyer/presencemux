@@ -1,7 +1,8 @@
 //! The decisions of the controller.
 
 use crate::{
-    Cam, CamPermission, DeviceStatus, Health, HostStatus, Mic, MicMute, MicPermission, PlaneState,
+    Cam, CamPermission, CamStream, DeviceStatus, Epoch, Health, HostStatus, Mic, MicMute,
+    MicPermission, PlaneState,
 };
 
 /// Returns the effective cam permission. Live needs a ready camera and cam
@@ -27,6 +28,13 @@ pub(crate) fn mic(state: &PlaneState<Mic>) -> MicPermission {
         (MicMute::Unmuted, true) => MicPermission::Permitted,
         (MicMute::Unmuted, false) | (MicMute::Muted, _) => MicPermission::Denied,
     }
+}
+
+/// Returns `true` if a stream timeout with `epoch` lowers the cam plane: the
+/// epoch is not older than the last command for the cam plane, and the host
+/// receives no stream.
+pub(crate) fn stream_lowers(state: &PlaneState<Cam>, epoch: Epoch) -> bool {
+    epoch >= state.epoch && state.observed().stream == CamStream::Idle
 }
 
 /// Returns `true` if the device was ready and is not ready now, or if the

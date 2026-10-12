@@ -5,7 +5,11 @@ interface io.presencemux.Controller
 type CamStatus (#  The value that the user asked for.
 desired: string, #  The value that the controller grants the cam worker.
 effective: string, #  Why automation lowered the plane. Null after the user sets the plane.
-cause: ?Cause)
+cause: ?Cause, #  Whether the host receives the stream of the cam worker.
+stream: CamStream)
+
+#  Whether the host receives the stream of the cam worker.
+type CamStream (idle, streaming)
 
 #  The state of the mic plane.
 type MicStatus (#  The value that the user asked for.
@@ -27,7 +31,7 @@ type Host (disconnected, suspended, connected)
 type Health (ready, degraded, fault)
 
 #  The reason why automation lowered a plane.
-type Cause (camera_fault, cam_worker_fault, audio_interface_fault, gate_fault, controller_stalled, host_disconnected, host_suspended, host_connected)
+type Cause (camera_fault, cam_worker_fault, audio_interface_fault, gate_fault, controller_stalled, host_disconnected, host_suspended, host_connected, stream_stopped)
 
 #  Returns the status.
 method Describe() -> (cam: CamStatus, mic: MicStatus, host: Host, health: Health, #  The last preset that the user applied. Null after the user changes a

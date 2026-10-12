@@ -45,6 +45,17 @@ pub struct CamStatus {
     /// Why automation lowered the plane. Null after the user sets the plane.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cause: Option<Cause>,
+    /// Whether the host receives the stream of the cam worker.
+    pub stream: CamStream,
+}
+
+/// Whether the host receives the stream of the cam worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
+#[serde(rename_all = "snake_case")]
+#[zlink(rename_all = "snake_case")]
+pub enum CamStream {
+    Idle,
+    Streaming,
 }
 
 /// The state of the mic plane.
@@ -111,6 +122,7 @@ pub enum Cause {
     HostDisconnected,
     HostSuspended,
     HostConnected,
+    StreamStopped,
 }
 
 /// The names of the configured presets.
@@ -189,6 +201,15 @@ impl fmt::Display for Host {
     }
 }
 
+impl fmt::Display for CamStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Self::Idle => "idle",
+            Self::Streaming => "streaming",
+        })
+    }
+}
+
 impl fmt::Display for Health {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad(match self {
@@ -210,6 +231,7 @@ impl fmt::Display for Cause {
             Self::HostDisconnected => "host_disconnected",
             Self::HostSuspended => "host_suspended",
             Self::HostConnected => "host_connected",
+            Self::StreamStopped => "stream_stopped",
         })
     }
 }
@@ -228,6 +250,15 @@ impl From<controller::MicPermission> for Permission {
         match permission {
             controller::MicPermission::Denied => Self::Denied,
             controller::MicPermission::Permitted => Self::Permitted,
+        }
+    }
+}
+
+impl From<controller::CamStream> for CamStream {
+    fn from(stream: controller::CamStream) -> Self {
+        match stream {
+            controller::CamStream::Idle => Self::Idle,
+            controller::CamStream::Streaming => Self::Streaming,
         }
     }
 }
@@ -265,6 +296,7 @@ impl From<controller::Cause> for Cause {
             controller::Cause::Host(controller::HostStatus::Disconnected) => Self::HostDisconnected,
             controller::Cause::Host(controller::HostStatus::Suspended) => Self::HostSuspended,
             controller::Cause::Host(controller::HostStatus::Connected) => Self::HostConnected,
+            controller::Cause::StreamStopped => Self::StreamStopped,
         }
     }
 }
@@ -307,6 +339,7 @@ mod tests {
         check(&[Permission::Denied, Permission::Permitted]);
         check(&[Host::Disconnected, Host::Suspended, Host::Connected]);
         check(&[Health::Ready, Health::Degraded, Health::Fault]);
+        check(&[CamStream::Idle, CamStream::Streaming]);
         check(&[
             Cause::CameraFault,
             Cause::CamWorkerFault,
@@ -316,6 +349,7 @@ mod tests {
             Cause::HostDisconnected,
             Cause::HostSuspended,
             Cause::HostConnected,
+            Cause::StreamStopped,
         ]);
     }
 }

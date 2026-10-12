@@ -13,7 +13,7 @@ mod plane;
 mod policy;
 mod preset;
 
-pub use cam::{Cam, CamObserved, CamPermission, SlateId};
+pub use cam::{Cam, CamObserved, CamPermission, CamStream, SlateId};
 pub use device::{Device, DeviceStatus, Health};
 pub use host::HostStatus;
 pub use mic::{Mic, MicMute, MicObserved, MicPermission};
@@ -42,6 +42,14 @@ pub enum Observation {
     /// last command for this plane has no effect.
     LeaseExpired(PlaneId, Epoch),
     Host(HostStatus),
+    /// The host started or stopped the stream of the cam worker.
+    CamStream(CamStream),
+    /// The host received no stream of the cam worker for the stream timeout.
+    /// The event loop reports it, with the epoch of the cam plane at the start
+    /// of the time without a stream. A timeout with an epoch older than the
+    /// last command for the cam plane, or while the host receives the stream,
+    /// has no effect.
+    StreamTimeout(Epoch),
 }
 
 impl From<Command> for Event {
@@ -102,6 +110,14 @@ impl Controller {
                 }
             }
             Event::Observation(Observation::Host(status)) => self.observe_host(status),
+            Event::Observation(Observation::CamStream(stream)) => {
+                self.cam.observed.stream = stream;
+            }
+            Event::Observation(Observation::StreamTimeout(epoch)) => {
+                if policy::stream_lowers(&self.cam, epoch) {
+                    self.lower(PlaneId::Cam, Cause::StreamStopped);
+                }
+            }
         }
         let cam = self.cam.update(Granted {
             permission: policy::cam(&self.cam),
@@ -179,7 +195,12 @@ impl Controller {
     fn observe(&mut self, device: Device, status: DeviceStatus) {
         match device {
             Device::Camera => self.cam.observe(device, status, |o| &mut o.camera),
-            Device::CamWorker => self.cam.observe(device, status, |o| &mut o.worker),
+            Device::CamWorker => {
+                self.cam.observe(device, status, |o| &mut o.worker);
+                if !status.is_ready() {
+                    self.cam.observed.stream = CamStream::Idle;
+                }
+            }
             Device::AudioInterface => self.mic.observe(device, status, |o| &mut o.interface),
             Device::Gate => self.mic.observe(device, status, |o| &mut o.gate),
         }
@@ -267,6 +288,64 @@ mod tests {
         let _ = controller.handle_input(device(Device::Camera, Ready));
 
         assert_eq!(controller.cam().target().permission, CamPermission::Blank);
+    }
+
+    #[test]
+    fn stream_timeout_while_idle_lowers_the_live_cam_with_stream_stopped() {
+        let mut controller = after(&[
+            device(Device::Camera, Ready),
+            device(Device::CamWorker, Ready),
+            live(),
+        ]);
+        let epoch = controller.granted(PlaneId::Cam);
+
+        let _ = controller.handle_input(Observation::StreamTimeout(epoch).into());
+
+        assert_eq!(controller.cam().cause(), Some(Cause::StreamStopped));
+    }
+
+    #[test]
+    fn stream_timeout_while_streaming_keeps_the_live_cam() {
+        let mut controller = after(&[
+            device(Device::Camera, Ready),
+            device(Device::CamWorker, Ready),
+            live(),
+            Observation::CamStream(CamStream::Streaming).into(),
+        ]);
+        let epoch = controller.granted(PlaneId::Cam);
+
+        let _ = controller.handle_input(Observation::StreamTimeout(epoch).into());
+
+        assert_eq!(controller.cam().target().permission, CamPermission::Live);
+    }
+
+    #[test]
+    fn stream_timeout_while_idle_lowers_a_slate() {
+        let mut controller = after(&[
+            device(Device::CamWorker, Ready),
+            Command::Apply(Preset {
+                cam: Some(CamPermission::Slate(SlateId(0))),
+                mic: None,
+            })
+            .into(),
+        ]);
+        let epoch = controller.granted(PlaneId::Cam);
+
+        let _ = controller.handle_input(Observation::StreamTimeout(epoch).into());
+
+        assert_eq!(controller.cam().target().permission, CamPermission::Blank);
+    }
+
+    #[test]
+    fn cam_worker_that_is_not_ready_gives_an_idle_stream() {
+        let mut controller = after(&[
+            device(Device::CamWorker, Ready),
+            Observation::CamStream(CamStream::Streaming).into(),
+        ]);
+
+        let _ = controller.handle_input(device(Device::CamWorker, Fault));
+
+        assert_eq!(controller.cam().observed().stream, CamStream::Idle);
     }
 
     #[test]

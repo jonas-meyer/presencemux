@@ -1,5 +1,10 @@
 # /etc/presencemux/config.toml
 
+[cam]
+# The cam plane goes to blank after the host receives no stream of the cam
+# worker for this many seconds. 0 turns the stream timeout off.
+stream_timeout = 30
+
 [slates.still-here]
 file = "/usr/share/presencemux-cam/slates/still-here.jpg"
 

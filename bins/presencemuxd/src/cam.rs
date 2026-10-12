@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use presencemux_api::cam::{self as api, CamProxy};
-use presencemux_core::{CamPermission, Device, Epoch, PlaneId};
+use presencemux_core::{CamPermission, Device, Epoch, Observation, PlaneId};
 use zlink::Connection;
 
 use crate::adapter::{Adapter, AdapterError, FIRST_WAIT, Latch, LatchReason, MAX_WAIT, Report};
@@ -89,6 +89,7 @@ impl Cam {
                 (Device::CamWorker, report.worker.into()),
             ],
             latch,
+            observations: vec![Observation::CamStream(report.host.into())],
         })
     }
 
@@ -165,7 +166,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::rc::Rc;
 
-    use presencemux_core::{DeviceStatus, Granted, SlateId};
+    use presencemux_core::{CamStream, DeviceStatus, Granted, SlateId};
     use tokio::net::UnixListener;
     use tokio::sync::Notify;
     use tokio::task::spawn_local;
@@ -352,6 +353,23 @@ mod tests {
                 (Device::Camera, DeviceStatus::Initializing),
                 (Device::CamWorker, DeviceStatus::Ready),
             ]
+        );
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn report_gives_the_stream_state_of_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let reply = api::Report {
+            host: api::HostStream::Streaming,
+            ..report()
+        };
+        let (mut cam, _worker) = start(&dir, "", vec![Reply::Report(reply)]);
+
+        let report = cam.exchange(leased(CamPermission::Blank, 0)).await.unwrap();
+
+        assert_eq!(
+            report.observations,
+            [Observation::CamStream(CamStream::Streaming)]
         );
     }
 

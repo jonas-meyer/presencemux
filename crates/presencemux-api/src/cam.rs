@@ -79,6 +79,15 @@ pub enum DeviceStatus {
     Fault,
 }
 
+impl From<HostStream> for presencemux_core::CamStream {
+    fn from(stream: HostStream) -> Self {
+        match stream {
+            HostStream::Idle => Self::Idle,
+            HostStream::Streaming => Self::Streaming,
+        }
+    }
+}
+
 impl From<DeviceStatus> for presencemux_core::DeviceStatus {
     fn from(status: DeviceStatus) -> Self {
         match status {

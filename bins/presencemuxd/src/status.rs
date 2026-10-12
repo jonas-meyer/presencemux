@@ -18,6 +18,7 @@ pub(crate) fn status(
             desired: slates.cam_value(cam.desired()).to_owned(),
             effective: slates.cam_value(cam.target().permission).to_owned(),
             cause: cam.cause().map(Cause::from),
+            stream: cam.observed().stream.into(),
         },
         mic: MicStatus {
             desired: mic.desired().into(),
@@ -32,7 +33,7 @@ pub(crate) fn status(
 
 #[cfg(test)]
 mod tests {
-    use presencemux_api::{Health, Host, Mute, Permission};
+    use presencemux_api::{CamStream, Health, Host, Mute, Permission};
     use presencemux_core::{Command, Preset};
 
     use super::*;
@@ -52,6 +53,7 @@ mod tests {
                     desired: "blank".to_owned(),
                     effective: "blank".to_owned(),
                     cause: None,
+                    stream: CamStream::Idle,
                 },
                 mic: MicStatus {
                     desired: Mute::Muted,

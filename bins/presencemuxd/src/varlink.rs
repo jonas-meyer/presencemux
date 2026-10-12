@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use presencemux_api::{
-    CamStatus, Cause, Error, Health, Host, MicStatus, Mute, Permission, Presets, Status,
+    CamStatus, CamStream, Cause, Error, Health, Host, MicStatus, Mute, Permission, Presets, Status,
 };
 use presencemux_core::{MicMute, Preset};
 use rustix::io::Errno;
@@ -126,7 +126,7 @@ impl Service {
     product = "presencemuxd",
     version = env!("CARGO_PKG_VERSION"),
     url = "https://github.com/jonas-meyer/presencemux",
-    types = [CamStatus, MicStatus, Mute, Permission, Host, Health, Cause]
+    types = [CamStatus, CamStream, MicStatus, Mute, Permission, Host, Health, Cause]
 )]
 impl Service {
     /// Returns the status.

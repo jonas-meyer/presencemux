@@ -40,6 +40,9 @@ pub(crate) struct Report {
     /// The latch of the owner in the session of this daemon, if the owner is
     /// latched.
     pub(crate) latch: Option<Latch>,
+    /// The other observations of the owner, for example whether the host
+    /// receives the stream.
+    pub(crate) observations: Vec<Observation>,
 }
 
 /// A block of a privacy plane at the owner until a lease with a newer grant
@@ -173,6 +176,7 @@ fn observations(owner: Owner, report: Report, last_latch: &mut Option<Latch>) ->
         observations.push(Observation::LeaseExpired(latch.plane, latch.epoch));
     }
     *last_latch = report.latch;
+    observations.extend(report.observations);
     observations
 }
 
@@ -259,6 +263,7 @@ mod tests {
                 (Device::CamWorker, DeviceStatus::Ready),
             ],
             latch,
+            observations: Vec::new(),
         }
     }
 

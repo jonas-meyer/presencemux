@@ -4,6 +4,7 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use presencemux_api::{CAM_BLANK, CAM_LIVE, PRESET_PRIVACY};
 use presencemux_core::{CamPermission, MicMute, Preset, SlateId};
@@ -15,6 +16,9 @@ use serde::de::IgnoredAny;
 pub(crate) struct Config {
     presets: BTreeMap<PresetName, Preset>,
     pub(crate) slates: Slates,
+    /// The time without a stream of the cam worker after which the cam plane
+    /// goes to blank. `None` if the stream timeout is off.
+    pub(crate) stream_timeout: Option<Duration>,
 }
 
 /// A configured preset name. The built-in [`PRESET_PRIVACY`] preset cannot be
@@ -111,7 +115,14 @@ impl Config {
             })
             .collect::<Result<_, ParseError>>()?;
 
-        Ok(Self { presets, slates })
+        let stream_timeout =
+            (file.cam.stream_timeout > 0).then_some(Duration::from_secs(file.cam.stream_timeout));
+
+        Ok(Self {
+            presets,
+            slates,
+            stream_timeout,
+        })
     }
 
     /// Returns the names of the configured presets, in order.
@@ -242,6 +253,28 @@ struct File {
     slates: BTreeMap<SlateName, IgnoredAny>,
     #[serde(default)]
     presets: BTreeMap<PresetName, PresetFile>,
+    #[serde(default)]
+    cam: CamTable,
+}
+
+/// The default stream timeout in seconds.
+const DEFAULT_STREAM_TIMEOUT: u64 = 30;
+
+/// The `[cam]` table.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct CamTable {
+    /// The time in seconds without a stream of the cam worker after which the
+    /// cam plane goes to blank. 0 turns the stream timeout off.
+    stream_timeout: u64,
+}
+
+impl Default for CamTable {
+    fn default() -> Self {
+        Self {
+            stream_timeout: DEFAULT_STREAM_TIMEOUT,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -387,6 +420,27 @@ mod tests {
             error.to_string().contains("cannot be a slate name"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn stream_timeout_is_30_s_without_a_cam_table() {
+        let config = Config::parse("").unwrap();
+
+        assert_eq!(config.stream_timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn stream_timeout_comes_from_the_cam_table() {
+        let config = Config::parse("[cam]\nstream_timeout = 120\n").unwrap();
+
+        assert_eq!(config.stream_timeout, Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn stream_timeout_of_0_turns_the_timeout_off() {
+        let config = Config::parse("[cam]\nstream_timeout = 0\n").unwrap();
+
+        assert_eq!(config.stream_timeout, None);
     }
 
     #[test]

@@ -78,6 +78,8 @@ pub enum Cause {
     DeviceFault(Device),
     ControllerStalled,
     Host(HostStatus),
+    /// The host received no stream of the cam worker for the stream timeout.
+    StreamStopped,
 }
 
 #[derive(Clone, Debug, PartialEq)]

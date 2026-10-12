@@ -34,6 +34,15 @@ impl PrivacyPlane for Cam {
 pub struct CamObserved {
     pub camera: DeviceStatus,
     pub worker: DeviceStatus,
+    pub stream: CamStream,
+}
+
+/// Whether the host receives the stream of the cam worker.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CamStream {
+    #[default]
+    Idle,
+    Streaming,
 }
 
 /// What the cam worker may send to the host.

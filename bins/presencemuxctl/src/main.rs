@@ -1,6 +1,5 @@
 //! A command-line client for presencemuxd.
 
-use std::fmt;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::pin::pin;
@@ -169,20 +168,24 @@ fn write_status(out: &mut impl Write, status: &Status) -> io::Result<()> {
         preset,
     } = status;
     writeln!(out, "preset  {}", preset.as_deref().unwrap_or("-"))?;
-    write_plane(out, "cam", &cam.desired, &cam.effective, cam.cause)?;
-    write_plane(out, "mic", &mic.desired, &mic.effective, mic.cause)?;
+    write!(
+        out,
+        "cam     desired {}, effective {}, stream {}",
+        cam.desired, cam.effective, cam.stream
+    )?;
+    write_cause(out, cam.cause)?;
+    write!(
+        out,
+        "mic     desired {}, effective {}",
+        mic.desired, mic.effective
+    )?;
+    write_cause(out, mic.cause)?;
     writeln!(out, "host    {host}")?;
     writeln!(out, "health  {health}")
 }
 
-fn write_plane(
-    out: &mut impl Write,
-    name: &str,
-    desired: &impl fmt::Display,
-    effective: &impl fmt::Display,
-    cause: Option<Cause>,
-) -> io::Result<()> {
-    write!(out, "{name:<8}desired {desired}, effective {effective}")?;
+/// Writes the cause of a plane, if automation lowered it, and ends the line.
+fn write_cause(out: &mut impl Write, cause: Option<Cause>) -> io::Result<()> {
     if let Some(cause) = cause {
         write!(out, ", lowered by {cause}")?;
     }
@@ -192,7 +195,7 @@ fn write_plane(
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
-    use presencemux_api::{CamStatus, Health, Host, MicStatus, Mute, Permission};
+    use presencemux_api::{CamStatus, CamStream, Health, Host, MicStatus, Mute, Permission};
 
     use super::*;
 
@@ -234,6 +237,7 @@ mod tests {
                 desired: "brb".to_owned(),
                 effective: "blank".to_owned(),
                 cause: Some(Cause::CameraFault),
+                stream: CamStream::Idle,
             },
             mic: MicStatus {
                 desired: Mute::Muted,
@@ -251,7 +255,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "preset  brb\n\
-             cam     desired brb, effective blank, lowered by camera_fault\n\
+             cam     desired brb, effective blank, stream idle, lowered by camera_fault\n\
              mic     desired muted, effective denied\n\
              host    connected\n\
              health  degraded\n"

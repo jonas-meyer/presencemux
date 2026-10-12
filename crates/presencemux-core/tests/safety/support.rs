@@ -1,6 +1,6 @@
 use presencemux_core::{
-    CamPermission, Cause, Command, Controller, Device, DeviceStatus, Epoch, Event, HostStatus,
-    MicMute, Observation, OnAir, PlaneId, PlaneSummary, Preset, SlateId,
+    CamPermission, CamStream, Cause, Command, Controller, Device, DeviceStatus, Epoch, Event,
+    HostStatus, MicMute, Observation, OnAir, PlaneId, PlaneSummary, Preset, SlateId,
 };
 use proptest::prelude::*;
 use proptest::sample::select;
@@ -127,7 +127,13 @@ pub(crate) fn observation() -> impl Strategy<Value = Observation> {
         4 => (device(), device_status()).prop_map(|(d, s)| Observation::Device(d, s)),
         1 => (plane(), epoch()).prop_map(|(p, e)| Observation::LeaseExpired(p, e)),
         1 => host_status().prop_map(Observation::Host),
+        1 => cam_stream().prop_map(Observation::CamStream),
+        1 => epoch().prop_map(Observation::StreamTimeout),
     ]
+}
+
+pub(crate) fn cam_stream() -> impl Strategy<Value = CamStream> {
+    select(&[CamStream::Idle, CamStream::Streaming][..])
 }
 
 pub(crate) fn event() -> impl Strategy<Value = Event> {

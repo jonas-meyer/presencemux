@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use presencemux_api::Status;
 use presencemux_core::{
-    CamPermission, Command, Controller, Device, DeviceStatus, Effects, Event, Granted,
-    MicPermission, Observation, PlaneId, Preset,
+    CamPermission, CamStream, Command, Controller, Device, DeviceStatus, Effects, Epoch, Event,
+    Granted, MicPermission, Observation, PlaneId, Preset,
 };
 use rustix::time::{ClockId, clock_gettime};
 use tokio::sync::mpsc::error::TrySendError;
@@ -132,6 +132,18 @@ pub(crate) struct EventLoop {
     status: watch::Sender<Status>,
     /// The time of the last report of each owner that has reported.
     reports: Vec<LastReport>,
+    /// The time without a stream of the cam worker, if the host receives none.
+    stream_idle: Option<StreamIdle>,
+}
+
+/// A time without a stream of the cam worker.
+#[derive(Debug)]
+struct StreamIdle {
+    since: Instant,
+    /// The epoch of the cam plane at `since`.
+    epoch: Epoch,
+    /// Whether the event loop sent `StreamTimeout` for this time.
+    sent: bool,
 }
 
 /// The time of the last report of an owner.
@@ -227,6 +239,7 @@ impl EventLoop {
             mic,
             status,
             reports: Vec::new(),
+            stream_idle: None,
         };
         let outputs = Outputs {
             cam: cam_receiver,
@@ -260,6 +273,7 @@ impl EventLoop {
                     }
                     last_tick = now;
                     self.check_reports(now);
+                    self.check_stream(now);
                     self.renew();
                     if let Some(period) = self.watchdog
                         && last_ping.is_none_or(|last| now - last >= period)
@@ -344,6 +358,39 @@ impl EventLoop {
             }
         }
         self.observe(faults);
+    }
+
+    /// Sends `StreamTimeout` once when the host has received no stream of the
+    /// cam worker for the stream timeout. A command for the cam plane starts
+    /// the time again.
+    fn check_stream(&mut self, now: Instant) {
+        let Some(timeout) = self.config.stream_timeout else {
+            return;
+        };
+        if self.controller.cam().observed().stream == CamStream::Streaming {
+            self.stream_idle = None;
+            return;
+        }
+        let epoch = self.controller.granted(PlaneId::Cam);
+        let idle = match &mut self.stream_idle {
+            Some(idle) if idle.epoch == epoch => idle,
+            slot => slot.insert(StreamIdle {
+                since: now,
+                epoch,
+                sent: false,
+            }),
+        };
+        if idle.sent || now - idle.since < timeout {
+            return;
+        }
+        idle.sent = true;
+        if self.controller.cam().desired() != CamPermission::Blank {
+            tracing::info!(
+                "no stream of the cam worker for {} s, the cam plane goes to blank",
+                timeout.as_secs()
+            );
+        }
+        self.observe([Observation::StreamTimeout(epoch)]);
     }
 
     /// Sets the time of the last report of each owner to `now`.
@@ -691,5 +738,116 @@ mod tests {
         settle().await;
 
         assert_eq!(outputs.status.borrow().health, Health::Degraded);
+    }
+
+    /// Starts the event loop with `config`, with a ready camera and cam worker
+    /// and the cam plane live.
+    async fn start_with_live_cam(config: &str) -> (Handle, Outputs) {
+        let (_, handle, outputs) = start(config);
+        ready(&handle, &[Device::Camera, Device::CamWorker]).await;
+        handle.request(cam(CamPermission::Live)).await.unwrap();
+        (handle, outputs)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cam_without_a_stream_for_30_s_goes_to_blank() {
+        let (_handle, outputs) = start_with_live_cam("").await;
+
+        time::sleep(Duration::from_secs(30) + 2 * TICK).await;
+
+        assert_eq!(
+            outputs.cam.borrow().granted.permission,
+            CamPermission::Blank
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cam_without_a_stream_for_30_s_has_the_cause_stream_stopped() {
+        let (_handle, outputs) = start_with_live_cam("").await;
+
+        time::sleep(Duration::from_secs(30) + 2 * TICK).await;
+
+        assert_eq!(
+            outputs.status.borrow().cam.cause,
+            Some(Cause::StreamStopped)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn second_time_without_a_stream_also_lowers_the_cam() {
+        let (handle, outputs) = start_with_live_cam("").await;
+        time::sleep(Duration::from_secs(10)).await;
+        handle
+            .observe(Observation::CamStream(CamStream::Streaming))
+            .await
+            .unwrap();
+        time::sleep(Duration::from_secs(10)).await;
+        handle
+            .observe(Observation::CamStream(CamStream::Idle))
+            .await
+            .unwrap();
+
+        time::sleep(Duration::from_secs(30) + 2 * TICK).await;
+
+        assert_eq!(
+            outputs.status.borrow().cam.cause,
+            Some(Cause::StreamStopped)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mic_command_does_not_start_the_time_without_a_stream_again() {
+        let (handle, outputs) = start_with_live_cam("").await;
+        time::sleep(Duration::from_secs(20)).await;
+
+        handle.request(mic(MicMute::Unmuted)).await.unwrap();
+        time::sleep(Duration::from_secs(10) + 2 * TICK).await;
+
+        assert_eq!(
+            outputs.status.borrow().cam.cause,
+            Some(Cause::StreamStopped)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cam_without_a_stream_for_29_s_stays_live() {
+        let (_handle, outputs) = start_with_live_cam("").await;
+
+        time::sleep(Duration::from_secs(29)).await;
+
+        assert_eq!(outputs.cam.borrow().granted.permission, CamPermission::Live);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cam_with_a_stream_stays_live_after_30_s() {
+        let (handle, outputs) = start_with_live_cam("").await;
+        handle
+            .observe(Observation::CamStream(CamStream::Streaming))
+            .await
+            .unwrap();
+
+        time::sleep(Duration::from_secs(31)).await;
+
+        assert_eq!(outputs.cam.borrow().granted.permission, CamPermission::Live);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cam_command_starts_the_time_without_a_stream_again() {
+        let (handle, outputs) = start_with_live_cam("").await;
+        time::sleep(Duration::from_secs(20)).await;
+
+        handle.request(cam(CamPermission::Live)).await.unwrap();
+        time::sleep(Duration::from_secs(20)).await;
+
+        assert_eq!(outputs.cam.borrow().granted.permission, CamPermission::Live);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_timeout_of_0_keeps_the_cam_live() {
+        let (_handle, outputs) = start_with_live_cam("[cam]\nstream_timeout = 0\n").await;
+
+        time::sleep(Duration::from_secs(60)).await;
+
+        assert_eq!(outputs.cam.borrow().granted.permission, CamPermission::Live);
     }
 }
