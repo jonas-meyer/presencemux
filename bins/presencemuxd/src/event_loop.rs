@@ -1,12 +1,13 @@
 //! The event loop and the leases that it renews.
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use presencemux_api::Status;
 use presencemux_core::{
-    CamPermission, Command, Controller, Effects, Event, Granted, MicPermission, Observation,
-    PlaneId, Preset,
+    CamPermission, Command, Controller, Device, DeviceStatus, Effects, Event, Granted,
+    MicPermission, Observation, PlaneId, Preset,
 };
 use rustix::time::{ClockId, clock_gettime};
 use tokio::sync::mpsc::error::TrySendError;
@@ -18,13 +19,60 @@ use crate::status::status;
 use crate::systemd;
 
 const CAPACITY: usize = 64;
-const TICK: Duration = Duration::from_millis(200);
-const LEASE: Duration = Duration::from_secs(1);
+pub(crate) const TICK: Duration = Duration::from_millis(200);
+pub(crate) const LEASE: Duration = Duration::from_secs(1);
+/// The longest time between two reports of an owner. After it, the devices of
+/// the owner are at fault.
+pub(crate) const REPORT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A time on `CLOCK_MONOTONIC`. Other processes on the same computer read
 /// the same clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Monotonic(Duration);
+
+impl Monotonic {
+    /// Creates a time on `CLOCK_MONOTONIC` from `time`.
+    #[cfg(test)]
+    pub(crate) const fn from_duration(time: Duration) -> Self {
+        Self(time)
+    }
+
+    /// Returns the time in microseconds. The largest value is `i64::MAX`.
+    pub(crate) fn as_micros(self) -> i64 {
+        i64::try_from(self.0.as_micros()).unwrap_or(i64::MAX)
+    }
+}
+
+/// A process that owns devices. One adapter connects the daemon to each owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Owner {
+    CamWorker,
+}
+
+impl fmt::Display for Owner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::CamWorker => "cam worker",
+        })
+    }
+}
+
+impl Owner {
+    /// Returns the devices of the owner.
+    pub(crate) const fn devices(self) -> &'static [Device] {
+        match self {
+            Self::CamWorker => &[Device::Camera, Device::CamWorker],
+        }
+    }
+
+    /// Returns a fault for each device of the owner.
+    pub(crate) fn faults(self) -> Vec<Observation> {
+        self.devices()
+            .iter()
+            .map(|&device| Observation::Device(device, DeviceStatus::Fault))
+            .collect()
+    }
+}
 
 /// A target that the media layer may apply until `until`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,12 +105,15 @@ pub(crate) struct Handle(mpsc::Sender<Message>);
 
 /// The receivers of the leased targets and the status.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "only the tests use this until the adapters exist")
-)]
 pub(crate) struct Outputs {
     pub(crate) cam: watch::Receiver<Leased<CamPermission>>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "only the tests use this until the gate adapter exists"
+        )
+    )]
     pub(crate) mic: watch::Receiver<Leased<MicPermission>>,
     pub(crate) status: watch::Receiver<Status>,
 }
@@ -79,14 +130,31 @@ pub(crate) struct EventLoop {
     cam: watch::Sender<Leased<CamPermission>>,
     mic: watch::Sender<Leased<MicPermission>>,
     status: watch::Sender<Status>,
+    /// The time of the last report of each owner that has reported.
+    reports: Vec<LastReport>,
+}
+
+/// The time of the last report of an owner.
+#[derive(Debug)]
+struct LastReport {
+    owner: Owner,
+    at: Instant,
+    /// Whether the report is older than [`REPORT_TIMEOUT`], and the devices of
+    /// the owner are at fault.
+    stale: bool,
 }
 
 #[derive(Debug)]
-enum Message {
+pub(crate) enum Message {
     Request(Request, oneshot::Sender<()>),
+    /// The observations of one report of an owner.
+    Report(Owner, Vec<Observation>),
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "only the tests use this until the adapters exist")
+        expect(
+            dead_code,
+            reason = "only the tests use this until the host watch exists"
+        )
     )]
     Observation(Observation),
 }
@@ -113,16 +181,42 @@ impl Handle {
         handled.await.map_err(|_| HandleError::Stopped)
     }
 
+    /// Sends the observations of a report of `owner`. It waits while the
+    /// channel is full.
+    pub(crate) async fn report(
+        &self,
+        owner: Owner,
+        observations: Vec<Observation>,
+    ) -> Result<(), HandleError> {
+        self.0
+            .send(Message::Report(owner, observations))
+            .await
+            .map_err(|_| HandleError::Stopped)
+    }
+
     /// Sends an observation. It waits while the channel is full.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "only the tests use this until the adapters exist")
+        expect(
+            dead_code,
+            reason = "only the tests use this until the host watch exists"
+        )
     )]
     pub(crate) async fn observe(&self, observation: Observation) -> Result<(), HandleError> {
         self.0
             .send(Message::Observation(observation))
             .await
             .map_err(|_| HandleError::Stopped)
+    }
+}
+
+#[cfg(test)]
+impl Handle {
+    /// Returns a handle and the receiver of its messages, without an event
+    /// loop.
+    pub(crate) fn detached() -> (Self, mpsc::Receiver<Message>) {
+        let (sender, messages) = mpsc::channel(CAPACITY);
+        (Self(sender), messages)
     }
 }
 
@@ -145,6 +239,7 @@ impl EventLoop {
             cam,
             mic,
             status,
+            reports: Vec::new(),
         };
         let outputs = Outputs {
             cam: cam_receiver,
@@ -174,8 +269,10 @@ impl EventLoop {
                     let now = Instant::now();
                     if now - last_tick > LEASE {
                         self.lapse();
+                        self.restart_report_times(now);
                     }
                     last_tick = now;
+                    self.check_reports(now);
                     self.renew();
                     if let Some(period) = self.watchdog
                         && last_ping.is_none_or(|last| now - last >= period)
@@ -205,11 +302,67 @@ impl EventLoop {
                 self.publish();
                 let _ = done.send(());
             }
-            Message::Observation(observation) => {
-                if self.apply(observation.into()) {
-                    self.publish();
-                }
+            Message::Report(owner, observations) => {
+                self.record_report(owner);
+                self.observe(observations);
             }
+            Message::Observation(observation) => self.observe([observation]),
+        }
+    }
+
+    /// Gives each observation to the controller, and publishes the status if
+    /// it changed.
+    fn observe(&mut self, observations: impl IntoIterator<Item = Observation>) {
+        let mut changed = false;
+        for observation in observations {
+            changed |= self.apply(observation.into());
+        }
+        if changed {
+            self.publish();
+        }
+    }
+
+    /// Records the time of a report of `owner`.
+    fn record_report(&mut self, owner: Owner) {
+        let at = Instant::now();
+        match self.reports.iter_mut().find(|last| last.owner == owner) {
+            Some(last) => {
+                if last.stale {
+                    tracing::info!("the {owner} reports again");
+                }
+                last.at = at;
+                last.stale = false;
+            }
+            None => self.reports.push(LastReport {
+                owner,
+                at,
+                stale: false,
+            }),
+        }
+    }
+
+    /// Sets the devices of each owner without a report for [`REPORT_TIMEOUT`]
+    /// to fault, once until the next report.
+    fn check_reports(&mut self, now: Instant) {
+        let mut faults = Vec::new();
+        for last in &mut self.reports {
+            if !last.stale && now - last.at > REPORT_TIMEOUT {
+                tracing::warn!(
+                    "the devices of the {} are at fault after {} ms without a report",
+                    last.owner,
+                    REPORT_TIMEOUT.as_millis()
+                );
+                last.stale = true;
+                faults.extend(last.owner.faults());
+            }
+        }
+        self.observe(faults);
+    }
+
+    /// Sets the time of the last report of each owner to `now`.
+    fn restart_report_times(&mut self, now: Instant) {
+        for last in &mut self.reports {
+            last.at = now;
         }
     }
 
@@ -283,8 +436,8 @@ impl Clock {
 
 #[cfg(test)]
 mod tests {
-    use presencemux_api::{Cause, Mute};
-    use presencemux_core::{Device, DeviceStatus, MicMute};
+    use presencemux_api::{Cause, Health, Mute};
+    use presencemux_core::MicMute;
 
     use super::*;
 
@@ -312,6 +465,23 @@ mod tests {
             },
             name: None,
         }
+    }
+
+    fn cam(permission: CamPermission) -> Request {
+        Request {
+            preset: Preset {
+                cam: Some(permission),
+                mic: None,
+            },
+            name: None,
+        }
+    }
+
+    fn ready_observations() -> Vec<Observation> {
+        vec![
+            Observation::Device(Device::Camera, DeviceStatus::Ready),
+            Observation::Device(Device::CamWorker, DeviceStatus::Ready),
+        ]
     }
 
     fn mic(mute: MicMute) -> Request {
@@ -478,5 +648,61 @@ mod tests {
         let result = handle.request(mic(MicMute::Muted)).await;
 
         assert_eq!(result, Err(HandleError::Stopped));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owner_without_a_report_for_2_s_is_at_fault() {
+        let (_, handle, outputs) = start("");
+        handle
+            .report(Owner::CamWorker, ready_observations())
+            .await
+            .unwrap();
+
+        time::sleep(Duration::from_millis(2_300)).await;
+
+        assert_eq!(outputs.status.borrow().health, Health::Fault);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owner_with_a_report_every_1800_ms_keeps_the_cam_live() {
+        let (_, handle, outputs) = start("");
+        handle
+            .report(Owner::CamWorker, ready_observations())
+            .await
+            .unwrap();
+        handle.request(cam(CamPermission::Live)).await.unwrap();
+
+        time::sleep(Duration::from_millis(1_800)).await;
+        handle
+            .report(Owner::CamWorker, ready_observations())
+            .await
+            .unwrap();
+        time::sleep(Duration::from_millis(1_800)).await;
+
+        assert_eq!(outputs.cam.borrow().granted.permission, CamPermission::Live);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owner_that_never_reported_has_no_fault() {
+        let (_, _handle, outputs) = start("");
+
+        time::sleep(Duration::from_millis(2_300)).await;
+
+        assert_eq!(outputs.status.borrow().health, Health::Degraded);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn late_tick_does_not_set_an_owner_to_fault() {
+        let (_, handle, outputs) = start("");
+        handle
+            .report(Owner::CamWorker, ready_observations())
+            .await
+            .unwrap();
+        settle().await;
+
+        time::advance(Duration::from_millis(2_500)).await;
+        settle().await;
+
+        assert_eq!(outputs.status.borrow().health, Health::Degraded);
     }
 }

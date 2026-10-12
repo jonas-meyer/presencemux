@@ -257,6 +257,19 @@ mod tests {
     }
 
     #[test]
+    fn fault_before_the_device_is_ready_cancels_the_pending_live() {
+        let mut controller = after(&[
+            device(Device::CamWorker, Ready),
+            live(),
+            device(Device::Camera, Fault),
+        ]);
+
+        let _ = controller.handle_input(device(Device::Camera, Ready));
+
+        assert_eq!(controller.cam().target().permission, CamPermission::Blank);
+    }
+
+    #[test]
     fn health_is_degraded_while_a_device_is_missing() {
         let controller = after(&[
             device(Device::CamWorker, Ready),

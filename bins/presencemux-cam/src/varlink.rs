@@ -104,7 +104,6 @@ impl From<choice::Rejection> for Rejection {
             choice::Rejection::TooLong => Self::TooLong,
             choice::Rejection::OldSession => Self::OldSession,
             choice::Rejection::OldEpoch => Self::OldEpoch,
-            choice::Rejection::Raised => Self::Raised,
         }
     }
 }

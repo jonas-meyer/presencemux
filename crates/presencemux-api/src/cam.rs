@@ -79,6 +79,17 @@ pub enum DeviceStatus {
     Fault,
 }
 
+impl From<DeviceStatus> for presencemux_core::DeviceStatus {
+    fn from(status: DeviceStatus) -> Self {
+        match status {
+            DeviceStatus::Missing => Self::Missing,
+            DeviceStatus::Initializing => Self::Initializing,
+            DeviceStatus::Ready => Self::Ready,
+            DeviceStatus::Fault => Self::Fault,
+        }
+    }
+}
+
 /// A block of live video until a lease with a newer grant arrives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
 #[serde(rename_all = "camelCase")]
@@ -119,8 +130,17 @@ pub enum Rejection {
     OldSession,
     /// The lease has an older epoch than the last lease of its session.
     OldEpoch,
-    /// The lease has the grant of the last lease and a higher permission.
-    Raised,
+}
+
+impl fmt::Display for Rejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Self::Late => "late",
+            Self::TooLong => "too_long",
+            Self::OldSession => "old_session",
+            Self::OldEpoch => "old_epoch",
+        })
+    }
 }
 
 /// The frame that the cam worker sends.
@@ -209,6 +229,21 @@ mod tests {
                 "untilUSec": 3,
             })
         );
+    }
+
+    #[test]
+    fn rejection_display_matches_the_wire_value() {
+        for rejection in [
+            Rejection::Late,
+            Rejection::TooLong,
+            Rejection::OldSession,
+            Rejection::OldEpoch,
+        ] {
+            assert_eq!(
+                serde_json::to_value(rejection).unwrap(),
+                serde_json::Value::String(rejection.to_string())
+            );
+        }
     }
 
     #[test]

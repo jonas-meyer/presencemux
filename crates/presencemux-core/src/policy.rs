@@ -29,9 +29,11 @@ pub(crate) fn mic(state: &PlaneState<Mic>) -> MicPermission {
     }
 }
 
-/// Returns `true` if the device was ready and is not ready now.
+/// Returns `true` if the device was ready and is not ready now, or if the
+/// device has a new fault.
 pub(crate) fn device_lowers(before: DeviceStatus, after: DeviceStatus) -> bool {
-    before.is_ready() && !after.is_ready()
+    (before.is_ready() && !after.is_ready())
+        || (after == DeviceStatus::Fault && before != DeviceStatus::Fault)
 }
 
 /// Returns `true` if the host is no longer connected. A suspend counts too.

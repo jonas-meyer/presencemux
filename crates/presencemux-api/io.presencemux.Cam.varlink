@@ -52,9 +52,7 @@ type Rejection (
 	#  The lease comes from an older daemon run than the last lease.
 	old_session,
 	#  The lease has an older epoch than the last lease of its session.
-	old_epoch,
-	#  The lease has the grant of the last lease and a higher permission.
-	raised
+	old_epoch
 )
 
 #  The frame that the cam worker sends.

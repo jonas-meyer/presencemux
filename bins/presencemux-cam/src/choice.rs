@@ -20,18 +20,6 @@ pub(crate) enum Permission {
     Live,
 }
 
-impl Permission {
-    /// Returns the level of the permission. Blank is the lowest, and live the
-    /// highest.
-    fn level(&self) -> u8 {
-        match self {
-            Self::Blank => 0,
-            Self::Slate(_) => 1,
-            Self::Live => 2,
-        }
-    }
-}
-
 /// The session and the epoch of a lease. The order of grants is by session,
 /// then by epoch. The order of the fields gives this order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -91,8 +79,6 @@ pub(crate) enum Rejection {
     OldSession,
     /// The lease has an older epoch than the last lease of its session.
     OldEpoch,
-    /// The lease has the grant of the last lease and a higher permission.
-    Raised,
 }
 
 impl fmt::Display for Rejection {
@@ -102,7 +88,6 @@ impl fmt::Display for Rejection {
             Self::TooLong => "too long",
             Self::OldSession => "old session",
             Self::OldEpoch => "old epoch",
-            Self::Raised => "raised",
         })
     }
 }
@@ -162,12 +147,6 @@ impl Choice {
                 return Err(Rejection::OldSession);
             }
             Some(last) if lease.grant < last.grant => return Err(Rejection::OldEpoch),
-            Some(last)
-                if lease.grant == last.grant
-                    && lease.permission.level() > last.permission.level() =>
-            {
-                return Err(Rejection::Raised);
-            }
             Some(_) => {}
             None => {
                 self.latch = Some(Latch {
@@ -179,13 +158,13 @@ impl Choice {
         if self.latch.is_some_and(|latch| lease.grant > latch.grant) {
             self.latch = None;
         }
-        let new_grant = self
+        let new_live = self
             .last
             .as_ref()
-            .is_none_or(|last| last.grant != lease.grant);
+            .is_none_or(|last| last.grant != lease.grant || last.permission != Permission::Live);
         if lease.permission != Permission::Live {
             self.live_since = None;
-        } else if new_grant {
+        } else if new_live {
             self.live_since = Some(now);
         }
         self.last = Some(lease);
@@ -294,6 +273,15 @@ mod tests {
 
     fn slate(epoch: u32) -> Lease {
         lease(epoch, Permission::Slate("away".to_owned()))
+    }
+
+    /// Returns a choice with the blank lease of epoch 1 at `NOW`, after the
+    /// blank boot lease of epoch 0. The worker is not latched.
+    fn blank_choice() -> Choice {
+        let mut choice = Choice::default();
+        choice.renew(lease(0, Permission::Blank), NOW).unwrap();
+        choice.renew(lease(1, Permission::Blank), NOW).unwrap();
+        choice
     }
 
     /// Returns a choice with the live lease of epoch 1 at `NOW`, after the
@@ -709,13 +697,35 @@ mod tests {
     }
 
     #[test]
-    fn lease_with_the_same_grant_and_a_higher_permission_is_rejected_as_raised() {
+    fn lease_with_the_same_grant_and_a_higher_permission_is_accepted() {
         let mut choice = live_choice();
         choice.renew(slate(2), NOW).unwrap();
 
         let result = choice.renew(live(2), NOW);
 
-        assert_eq!(result, Err(Rejection::Raised));
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn raise_to_live_in_the_same_grant_without_a_frame_does_not_latch_the_worker_before_500_ms() {
+        let mut choice = blank_choice();
+        let raised = NOW + Duration::from_millis(400);
+        choice.renew(live(1), raised).unwrap();
+
+        let latch = choice.check(raised + Duration::from_millis(499), None);
+
+        assert_eq!(latch, None);
+    }
+
+    #[test]
+    fn raise_to_live_in_the_same_grant_without_a_frame_latches_the_worker_after_500_ms() {
+        let mut choice = blank_choice();
+        let raised = NOW + Duration::from_millis(400);
+        choice.renew(live(1), raised).unwrap();
+
+        let latch = choice.check(raised + Duration::from_millis(500), None);
+
+        assert_eq!(latch.map(|latch| latch.reason), Some(Reason::Stalled));
     }
 
     #[test]
@@ -906,10 +916,6 @@ mod tests {
             Some(Rejection::OldSession)
         } else if last.is_some_and(|last| lease.grant < last.grant) {
             Some(Rejection::OldEpoch)
-        } else if last.is_some_and(|last| {
-            lease.grant == last.grant && lease.permission.level() > last.permission.level()
-        }) {
-            Some(Rejection::Raised)
         } else {
             None
         }

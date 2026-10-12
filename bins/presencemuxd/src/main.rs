@@ -1,20 +1,24 @@
 //! The policy daemon of PresenceMux.
 
+mod adapter;
+mod cam;
 mod config;
 mod event_loop;
 mod status;
 mod systemd;
 mod varlink;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::task::JoinSet;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 
+use crate::cam::Cam;
 use crate::config::Config;
 use crate::event_loop::EventLoop;
 use crate::varlink::Service;
@@ -35,6 +39,8 @@ enum Error {
     Accept(std::io::Error),
     #[error("the event loop stopped")]
     EventLoopStopped,
+    #[error("an adapter stopped")]
+    AdapterStopped,
 }
 
 #[tokio::main(flavor = "local")]
@@ -56,6 +62,12 @@ async fn run() -> Result<(), Error> {
         .ok_or(Error::NoSocket)?;
     let (event_loop, handle, outputs) = EventLoop::new(Arc::clone(&config));
     let event_loop = event_loop.with_watchdog(systemd::watchdog_period());
+    let mut adapters = JoinSet::new();
+    let cam = Cam::new(
+        PathBuf::from(presencemux_api::cam::SOCKET_PATH),
+        Arc::clone(&config),
+    );
+    adapters.spawn_local(adapter::drive(outputs.cam, cam, handle.clone()));
     let service = Service::new(handle, outputs.status, config);
     let mut terminate = signal(SignalKind::terminate()).map_err(Error::Signal)?;
     let mut interrupt = signal(SignalKind::interrupt()).map_err(Error::Signal)?;
@@ -63,13 +75,20 @@ async fn run() -> Result<(), Error> {
     systemd::ready();
     tracing::info!("presencemuxd started in Privacy");
 
-    // The event loop runs in this `select!`. If it ends or panics, the daemon
-    // exits, and systemd starts it again in Privacy.
+    // The event loop runs in this `select!`. If the event loop or an adapter
+    // ends or panics, the daemon exits. systemd then starts the daemon again in
+    // Privacy.
     tokio::select! {
         biased;
         _ = terminate.recv() => {}
         _ = interrupt.recv() => {}
         () = event_loop.run() => return Err(Error::EventLoopStopped),
+        Some(result) = adapters.join_next() => {
+            if let Err(error) = result {
+                tracing::error!("an adapter failed: {error}");
+            }
+            return Err(Error::AdapterStopped);
+        }
         result = varlink::serve(listener, service, varlink::MAX_CONNECTIONS) => {
             let Err(error) = result;
             return Err(Error::Accept(error));

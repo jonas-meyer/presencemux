@@ -44,6 +44,14 @@ pub(crate) fn not_ready() -> impl Strategy<Value = DeviceStatus> {
     select(statuses)
 }
 
+pub(crate) fn not_fault() -> impl Strategy<Value = DeviceStatus> {
+    let statuses: Vec<_> = STATUSES
+        .into_iter()
+        .filter(|&s| s != DeviceStatus::Fault)
+        .collect();
+    select(statuses)
+}
+
 pub(crate) fn host_status() -> impl Strategy<Value = HostStatus> {
     select(
         &[

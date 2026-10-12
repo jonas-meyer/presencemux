@@ -1,7 +1,9 @@
 use presencemux_core::{Cause, DeviceStatus, Observation, OnAir, PlaneId};
 use proptest::prelude::*;
 
-use crate::support::{after, cause_after_lowering, device, events, not_ready, observations};
+use crate::support::{
+    after, cause_after_lowering, device, events, not_fault, not_ready, observations,
+};
 
 proptest! {
     #[test]
@@ -25,6 +27,20 @@ proptest! {
         for other in PlaneId::ALL.into_iter().filter(|&p| p != failed.plane()) {
             prop_assert_eq!(controller.plane(other), before.plane(other));
         }
+    }
+
+    #[test]
+    fn new_fault_lowers_its_plane_from_any_status(
+        prefix in events(),
+        failed in device(),
+        before in not_fault(),
+    ) {
+        let mut controller = after(prefix);
+        let _ = controller.handle_input(Observation::Device(failed, before).into());
+
+        let _ = controller.handle_input(Observation::Device(failed, DeviceStatus::Fault).into());
+
+        prop_assert_eq!(controller.plane(failed.plane()).requested, OnAir::Off);
     }
 
     #[test]
