@@ -158,7 +158,7 @@ fn audio_common(plan: &mut Plan, f: &str) {
         ("c_srate", "48000"),
         ("p_ssize", "2"),
         ("c_ssize", "2"),
-        ("c_sync", "async"),
+        ("c_sync", "adaptive"),
         ("p_mute_present", "0"),
         ("p_volume_present", "0"),
         ("c_mute_present", "0"),
