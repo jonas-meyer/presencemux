@@ -149,13 +149,7 @@ pub(crate) enum Message {
     Request(Request, oneshot::Sender<()>),
     /// The observations of one report of an owner.
     Report(Owner, Vec<Observation>),
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "only the tests use this until the host watch exists"
-        )
-    )]
+    /// An observation that no owner reports, for example the host status.
     Observation(Observation),
 }
 
@@ -195,13 +189,6 @@ impl Handle {
     }
 
     /// Sends an observation. It waits while the channel is full.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "only the tests use this until the host watch exists"
-        )
-    )]
     pub(crate) async fn observe(&self, observation: Observation) -> Result<(), HandleError> {
         self.0
             .send(Message::Observation(observation))

@@ -31,7 +31,7 @@ systemd-units = { enable = true, start = true }
 listenfd.workspace = true
 presencemux-api.workspace = true
 presencemux-core.workspace = true
-rustix = { workspace = true, features = ["time"] }
+rustix = { workspace = true, features = ["event", "time"] }
 sd-notify.workspace = true
 serde.workspace = true
 thiserror.workspace = true

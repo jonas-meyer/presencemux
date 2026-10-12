@@ -4,6 +4,7 @@ mod adapter;
 mod cam;
 mod config;
 mod event_loop;
+mod host;
 mod status;
 mod systemd;
 mod varlink;
@@ -39,8 +40,10 @@ enum Error {
     Accept(std::io::Error),
     #[error("the event loop stopped")]
     EventLoopStopped,
-    #[error("an adapter stopped")]
-    AdapterStopped,
+    #[error("the {0} stopped")]
+    TaskStopped(&'static str),
+    #[error("a task of the daemon stopped: {0}")]
+    TaskPanicked(tokio::task::JoinError),
 }
 
 #[tokio::main(flavor = "local")]
@@ -62,12 +65,21 @@ async fn run() -> Result<(), Error> {
         .ok_or(Error::NoSocket)?;
     let (event_loop, handle, outputs) = EventLoop::new(Arc::clone(&config));
     let event_loop = event_loop.with_watchdog(systemd::watchdog_period());
-    let mut adapters = JoinSet::new();
+    let mut tasks = JoinSet::new();
     let cam = Cam::new(
         PathBuf::from(presencemux_api::cam::SOCKET_PATH),
         Arc::clone(&config),
     );
-    adapters.spawn_local(adapter::drive(outputs.cam, cam, handle.clone()));
+    let cam_handle = handle.clone();
+    tasks.spawn_local(async move {
+        adapter::drive(outputs.cam, cam, cam_handle).await;
+        "cam adapter"
+    });
+    let host_handle = handle.clone();
+    tasks.spawn_local(async move {
+        host::watch(host_handle).await;
+        "host watch"
+    });
     let service = Service::new(handle, outputs.status, config);
     let mut terminate = signal(SignalKind::terminate()).map_err(Error::Signal)?;
     let mut interrupt = signal(SignalKind::interrupt()).map_err(Error::Signal)?;
@@ -75,19 +87,19 @@ async fn run() -> Result<(), Error> {
     systemd::ready();
     tracing::info!("presencemuxd started in Privacy");
 
-    // The event loop runs in this `select!`. If the event loop or an adapter
-    // ends or panics, the daemon exits. systemd then starts the daemon again in
-    // Privacy.
+    // The event loop runs in this `select!`. If the event loop, an adapter or
+    // the host watch stops, also with a panic, the daemon exits. systemd then
+    // starts the daemon again in Privacy.
     tokio::select! {
         biased;
         _ = terminate.recv() => {}
         _ = interrupt.recv() => {}
         () = event_loop.run() => return Err(Error::EventLoopStopped),
-        Some(result) = adapters.join_next() => {
-            if let Err(error) = result {
-                tracing::error!("an adapter failed: {error}");
-            }
-            return Err(Error::AdapterStopped);
+        Some(result) = tasks.join_next() => {
+            return Err(match result {
+                Ok(name) => Error::TaskStopped(name),
+                Err(error) => Error::TaskPanicked(error),
+            });
         }
         result = varlink::serve(listener, service, varlink::MAX_CONNECTIONS) => {
             let Err(error) = result;
