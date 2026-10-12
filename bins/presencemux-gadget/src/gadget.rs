@@ -129,6 +129,8 @@ fn microphone(plan: &mut Plan) {
     plan.write(&format!("{f}/function_name"), "Studio Microphone");
     plan.write(&format!("{f}/if_ctrl_name"), "Studio Microphone");
     plan.write(&format!("{f}/p_it_name"), "Studio Microphone");
+    plan.write(&format!("{f}/clksrc_in_name"), "Studio Microphone");
+    plan.write(&format!("{f}/clksrc_out_name"), "Studio Microphone");
     plan.link(f, "configs/c.1/uac2.mic");
 }
 
@@ -143,12 +145,14 @@ fn speakers(plan: &mut Plan) {
     plan.write(&format!("{f}/function_name"), "Studio Audio");
     plan.write(&format!("{f}/if_ctrl_name"), "Studio Audio");
     plan.write(&format!("{f}/c_ot_name"), "Studio Audio");
+    plan.write(&format!("{f}/clksrc_in_name"), "Studio Audio");
+    plan.write(&format!("{f}/clksrc_out_name"), "Studio Audio");
     plan.link(f, "configs/c.1/uac2.spk");
 }
 
-/// Adds the settings that both UAC2 functions share: 48 kHz, 16 bit, an
-/// asynchronous host stream, and no mute or volume control.
+/// Adds the settings that both UAC2 functions share.
 fn audio_common(plan: &mut Plan, f: &str) {
+    // Both functions need the same single rate and no mute or volume control.
     for (attribute, value) in [
         ("p_srate", "48000"),
         ("c_srate", "48000"),
@@ -159,6 +163,9 @@ fn audio_common(plan: &mut Plan, f: &str) {
         ("p_volume_present", "0"),
         ("c_mute_present", "0"),
         ("c_volume_present", "0"),
+        ("p_hs_bint", "4"),
+        ("c_hs_bint", "4"),
+        ("fb_max", "5"),
         ("req_number", "4"),
     ] {
         plan.write(&format!("{f}/{attribute}"), value);

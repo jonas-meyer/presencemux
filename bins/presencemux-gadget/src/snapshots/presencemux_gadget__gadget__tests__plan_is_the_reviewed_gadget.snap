@@ -51,12 +51,17 @@ write functions/uac2.mic/p_mute_present = 0
 write functions/uac2.mic/p_volume_present = 0
 write functions/uac2.mic/c_mute_present = 0
 write functions/uac2.mic/c_volume_present = 0
+write functions/uac2.mic/p_hs_bint = 4
+write functions/uac2.mic/c_hs_bint = 4
+write functions/uac2.mic/fb_max = 5
 write functions/uac2.mic/req_number = 4
 write functions/uac2.mic/p_chmask = 1
 write functions/uac2.mic/c_chmask = 0
 write functions/uac2.mic/function_name = Studio Microphone
 write functions/uac2.mic/if_ctrl_name = Studio Microphone
 write functions/uac2.mic/p_it_name = Studio Microphone
+write functions/uac2.mic/clksrc_in_name = Studio Microphone
+write functions/uac2.mic/clksrc_out_name = Studio Microphone
 link configs/c.1/uac2.mic -> functions/uac2.mic
 mkdir functions/uac2.spk
 write functions/uac2.spk/p_srate = 48000
@@ -68,10 +73,15 @@ write functions/uac2.spk/p_mute_present = 0
 write functions/uac2.spk/p_volume_present = 0
 write functions/uac2.spk/c_mute_present = 0
 write functions/uac2.spk/c_volume_present = 0
+write functions/uac2.spk/p_hs_bint = 4
+write functions/uac2.spk/c_hs_bint = 4
+write functions/uac2.spk/fb_max = 5
 write functions/uac2.spk/req_number = 4
 write functions/uac2.spk/p_chmask = 0
 write functions/uac2.spk/c_chmask = 3
 write functions/uac2.spk/function_name = Studio Audio
 write functions/uac2.spk/if_ctrl_name = Studio Audio
 write functions/uac2.spk/c_ot_name = Studio Audio
+write functions/uac2.spk/clksrc_in_name = Studio Audio
+write functions/uac2.spk/clksrc_out_name = Studio Audio
 link configs/c.1/uac2.spk -> functions/uac2.spk
