@@ -266,15 +266,17 @@ pub enum Device {
 }
 
 /// The status of a device. `unknown` means that the controller has no fresh
-/// report of its worker.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
+/// report of its worker. The variants are in order from the best to the worst.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, CustomType,
+)]
 #[serde(rename_all = "snake_case")]
 #[zlink(rename_all = "snake_case")]
 pub enum DeviceStatus {
-    Unknown,
-    Missing,
-    Initializing,
     Ready,
+    Initializing,
+    Missing,
+    Unknown,
     Fault,
 }
 

@@ -812,7 +812,7 @@ fn worst_condition(status: &Status, now_usec: i64) -> String {
         .iter()
         .flat_map(|owner| &owner.devices)
         .filter(|device| device.status != DeviceStatus::Ready)
-        .max_by_key(|device| severity(device.status));
+        .max_by_key(|device| device.status);
     match worst {
         Some(device) => format!(
             "{}: {} {} {}",
@@ -822,17 +822,6 @@ fn worst_condition(status: &Status, now_usec: i64) -> String {
             age(now_usec - device.since_usec)
         ),
         None => status.health.to_string(),
-    }
-}
-
-/// Returns the rank of `status`. The worst status has the highest rank.
-const fn severity(status: DeviceStatus) -> u8 {
-    match status {
-        DeviceStatus::Ready => 0,
-        DeviceStatus::Initializing => 1,
-        DeviceStatus::Missing => 2,
-        DeviceStatus::Unknown => 3,
-        DeviceStatus::Fault => 4,
     }
 }
 
@@ -1435,5 +1424,19 @@ mod tests {
         let screen = screen(&config, None, NOW, Duration::from_secs(300));
 
         assert_eq!(screen.brightness, 60);
+    }
+
+    #[test]
+    fn info_bar_shows_the_worst_device() {
+        let mut snapshot = privacy();
+        snapshot.status.health = Health::Fault;
+        snapshot.status.owners[0].devices[1].status = DeviceStatus::Missing;
+        snapshot.status.owners[1].devices[0].status = DeviceStatus::Fault;
+        snapshot.status.owners[1].devices[1].status = DeviceStatus::Initializing;
+        let config = Config::parse("").unwrap();
+
+        let screen = screen(&config, Some(&snapshot), NOW, Duration::ZERO);
+
+        assert_eq!(screen.info_bar.bottom, "fault: gate fault 3m");
     }
 }

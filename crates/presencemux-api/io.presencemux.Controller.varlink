@@ -74,8 +74,8 @@ sinceUSec: int)
 type Device (camera, cam_worker, audio_interface, gate)
 
 #  The status of a device. `unknown` means that the controller has no fresh
-#  report of its worker.
-type DeviceStatus (unknown, missing, initializing, ready, fault)
+#  report of its worker. The variants are in order from the best to the worst.
+type DeviceStatus (ready, initializing, missing, unknown, fault)
 
 #  Whether the user wants the mic muted.
 type Mute (muted, unmuted)
