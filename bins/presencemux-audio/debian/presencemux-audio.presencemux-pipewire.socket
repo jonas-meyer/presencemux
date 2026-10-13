@@ -1,5 +1,6 @@
 [Unit]
 Description=PipeWire system socket of PresenceMux
+Documentation=https://github.com/jonas-meyer/presencemux
 
 [Socket]
 ListenStream=/run/pipewire/pipewire-0

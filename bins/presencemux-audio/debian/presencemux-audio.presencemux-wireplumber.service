@@ -2,6 +2,7 @@
 Description=WirePlumber system session manager of PresenceMux
 Documentation=https://github.com/jonas-meyer/presencemux
 BindsTo=presencemux-pipewire.service
+PartOf=presencemux-pipewire.service
 After=presencemux-pipewire.service
 
 [Service]

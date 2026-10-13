@@ -26,11 +26,12 @@ assets = [
     ["config/wireplumber.conf.d/50-presencemux.conf", "etc/wireplumber/wireplumber.conf.d/", "644"],
 ]
 # cargo-deb reads `debian/<package>.<unit>.<type>` for each unit. Without that
-# file, it reads `debian/<package>.<type>`.
+# file, it reads `debian/<package>.<type>`. An upgrade restarts only PipeWire.
+# systemd then restarts WirePlumber and the audio worker (`PartOf=`).
 systemd-units = [
     { unit-name = "presencemux-pipewire", enable = true, start = true },
-    { unit-name = "presencemux-wireplumber", enable = true, start = true },
-    { unit-name = "presencemux-audio", enable = true, start = true },
+    { unit-name = "presencemux-wireplumber", enable = true, start = true, restart-after-upgrade = false, stop-on-upgrade = false },
+    { unit-name = "presencemux-audio", enable = true, start = true, restart-after-upgrade = false, stop-on-upgrade = false },
 ]
 
 [dependencies]
