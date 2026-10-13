@@ -43,7 +43,7 @@ pub struct Status {
     pub preset: Option<String>,
 }
 
-/// The state of the cam plane. Its values are `blank`, `live` or a slate name.
+/// The state of the cam plane. A cam value is `blank`, `live` or a slate name.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
 #[serde(rename_all = "camelCase")]
 #[zlink(rename_all = "camelCase")]
@@ -56,16 +56,33 @@ pub struct CamStatus {
     /// means no stream. Null without a fresh report.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual: Option<String>,
-    /// Whether the cam worker applies the grant of the controller.
-    pub in_effect: bool,
-    /// Whether the cam worker blocks live video after a latch.
-    pub latched: bool,
+    /// What the host can get without a press. Null without a fresh report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<Exposure>,
+    /// The name of the slate of `exposure`. Null for another exposure, or for a
+    /// slate without a name in the configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slate: Option<String>,
+    /// Whether the host gets the exposure now. Null without a fresh report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow: Option<Flow>,
+    /// Why the exposure differs from the request. Null if it does not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<Reason>,
     /// Why automation holds the plane at blank. Null after the user sets the
     /// plane.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold: Option<Cause>,
+    /// Whether `Resume` applies the request again now.
+    pub resumable: bool,
     /// Whether the host receives the stream of the cam worker.
     pub stream: CamStream,
+    /// The time at which the stream timeout sets the cam to blank, in
+    /// `CLOCK_MONOTONIC` microseconds. Null unless the host receives no stream
+    /// while the exposure is above off.
+    #[serde(rename = "blankAtUSec", skip_serializing_if = "Option::is_none")]
+    #[zlink(rename = "blankAtUSec")]
+    pub blank_at_usec: Option<i64>,
 }
 
 /// Whether the host receives the stream of the cam worker.
@@ -90,14 +107,62 @@ pub struct MicStatus {
     /// without a fresh report.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual: Option<MicOutput>,
-    /// Whether the audio worker applies the grant of the controller.
-    pub in_effect: bool,
-    /// Whether the gate blocks the audio after a latch.
-    pub latched: bool,
+    /// What the host can get without a press. Null without a fresh report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<Exposure>,
+    /// Whether the host gets the exposure now. Null without a fresh report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow: Option<Flow>,
+    /// Why the exposure differs from the request. Null if it does not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<Reason>,
     /// Why automation holds the plane at muted. Null after the user sets the
     /// plane.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold: Option<Cause>,
+    /// Whether `Resume` applies the request again now.
+    pub resumable: bool,
+}
+
+/// What the host can get from a plane without a press. The exposure is the
+/// higher of the actual output and the grant that the worker applies. A
+/// latched worker exposes only its actual output.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, CustomType,
+)]
+#[serde(rename_all = "snake_case")]
+#[zlink(rename_all = "snake_case")]
+pub enum Exposure {
+    Off,
+    Slate,
+    Live,
+}
+
+/// Whether the host gets the exposure of a plane now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
+#[serde(rename_all = "snake_case")]
+#[zlink(rename_all = "snake_case")]
+pub enum Flow {
+    Flowing,
+    /// The host gets less than the exposure, for example because no app reads
+    /// the stream.
+    Idle,
+}
+
+/// Why the exposure of a plane differs from its request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
+#[serde(rename_all = "snake_case")]
+#[zlink(rename_all = "snake_case")]
+pub enum Reason {
+    /// Automation holds the plane. `hold` gives the cause.
+    Held,
+    /// The worker applies an older grant.
+    Updating,
+    /// The latch of the worker blocks the grant.
+    Blocked,
+    /// The controller grants less than the request, for example while a
+    /// device is not ready.
+    Waiting,
 }
 
 /// The audio that the host gets.
@@ -108,7 +173,7 @@ pub enum MicOutput {
     /// The gate writes digital silence.
     Silent,
     /// The gate passes audio with a falling gain, after a lease that closes
-    /// it.
+    /// the gate.
     Closing,
     /// The gate passes audio while it opens or is open.
     Passing,
@@ -176,6 +241,19 @@ pub struct DeviceCondition {
     pub since_usec: i64,
 }
 
+/// Returns `micros` as a short age in the largest whole unit: seconds,
+/// minutes, hours or days. A negative age shows as `0s`.
+#[must_use]
+pub fn age(micros: i64) -> String {
+    let seconds = micros.max(0) / 1_000_000;
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3_600 => format!("{}m", seconds / 60),
+        3_600..86_400 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
 /// A device that a worker owns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
 #[serde(rename_all = "snake_case")]
@@ -218,7 +296,7 @@ pub enum Permission {
     Permitted,
 }
 
-/// The USB connection to the computer on the other side of the gadget.
+/// The state of the USB connection to the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
 #[serde(rename_all = "snake_case")]
 #[zlink(rename_all = "snake_case")]
@@ -239,7 +317,7 @@ pub enum Health {
     Fault,
 }
 
-/// The reason why automation lowered a plane.
+/// Why automation lowered a plane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
 #[serde(rename_all = "snake_case")]
 #[zlink(rename_all = "snake_case")]
@@ -264,10 +342,22 @@ pub enum Cause {
     StreamStopped,
 }
 
-/// The names of the configured presets.
+/// The presets, with the built-in `privacy` first.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct Presets {
-    pub presets: Vec<String>,
+    pub presets: Vec<PresetValues>,
+}
+
+/// A preset and the values that it sets. A missing value leaves its plane as it
+/// is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
+pub struct PresetValues {
+    pub name: String,
+    /// `blank`, `live` or a slate name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cam: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mic: Option<Mute>,
 }
 
 /// An error of `io.presencemux.Controller`.
@@ -441,6 +531,57 @@ impl From<Plane> for controller::PlaneId {
     }
 }
 
+impl From<controller::OnAir> for Exposure {
+    fn from(level: controller::OnAir) -> Self {
+        match level {
+            controller::OnAir::Off => Self::Off,
+            controller::OnAir::Canned => Self::Slate,
+            controller::OnAir::Live => Self::Live,
+        }
+    }
+}
+
+impl From<controller::Flow> for Flow {
+    fn from(flow: controller::Flow) -> Self {
+        match flow {
+            controller::Flow::Flowing => Self::Flowing,
+            controller::Flow::Idle => Self::Idle,
+        }
+    }
+}
+
+impl From<controller::Reason> for Reason {
+    fn from(reason: controller::Reason) -> Self {
+        match reason {
+            controller::Reason::Held(_) => Self::Held,
+            controller::Reason::Updating => Self::Updating,
+            controller::Reason::Blocked => Self::Blocked,
+            controller::Reason::Waiting => Self::Waiting,
+        }
+    }
+}
+
+impl fmt::Display for Exposure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Self::Off => "off",
+            Self::Slate => "slate",
+            Self::Live => "live",
+        })
+    }
+}
+
+impl fmt::Display for Reason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(match self {
+            Self::Held => "held",
+            Self::Updating => "updating",
+            Self::Blocked => "blocked",
+            Self::Waiting => "waiting",
+        })
+    }
+}
+
 impl From<controller::MicMute> for Mute {
     fn from(mute: controller::MicMute) -> Self {
         match mute {
@@ -552,9 +693,11 @@ mod tests {
             requested: Mute::Unmuted,
             granted: Permission::Denied,
             actual: Some(MicOutput::Silent),
-            in_effect: true,
-            latched: false,
+            exposure: Some(Exposure::Off),
+            flow: Some(Flow::Flowing),
+            reason: Some(Reason::Held),
             hold: Some(Cause::HostSuspended),
+            resumable: false,
         })
         .unwrap();
 
@@ -564,11 +707,33 @@ mod tests {
                 "requested": "unmuted",
                 "granted": "denied",
                 "actual": "silent",
-                "inEffect": true,
-                "latched": false,
+                "exposure": "off",
+                "flow": "flowing",
+                "reason": "held",
                 "hold": "host_suspended",
+                "resumable": false,
             })
         );
+    }
+
+    #[test]
+    fn blank_time_is_blank_at_usec_in_json() {
+        let json = serde_json::to_value(CamStatus {
+            requested: CAM_LIVE.to_owned(),
+            granted: CAM_LIVE.to_owned(),
+            actual: Some(CAM_NOTHING.to_owned()),
+            exposure: Some(Exposure::Live),
+            slate: None,
+            flow: Some(Flow::Idle),
+            reason: None,
+            hold: None,
+            resumable: false,
+            stream: CamStream::Idle,
+            blank_at_usec: Some(7),
+        })
+        .unwrap();
+
+        assert_eq!(json["blankAtUSec"], 7);
     }
 
     #[test]
@@ -637,5 +802,20 @@ mod tests {
             Cause::HostConnected,
             Cause::StreamStopped,
         ]);
+    }
+
+    #[test]
+    fn age_of_59_s_shows_in_seconds() {
+        assert_eq!(age(59_999_999), "59s");
+    }
+
+    #[test]
+    fn age_of_90_min_shows_in_hours() {
+        assert_eq!(age(5_400_000_000), "1h");
+    }
+
+    #[test]
+    fn age_of_a_condition_from_the_future_shows_as_0_s() {
+        assert_eq!(age(-1), "0s");
     }
 }

@@ -1,6 +1,5 @@
 use crate::{
     Device, DeviceStatus, Epoch, Granted, OnAir, Plane, PlaneId, PlaneState, PrivacyPlane, Report,
-    Reported,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,12 +94,24 @@ pub enum CamOutput {
 }
 
 impl PlaneState<Cam> {
-    /// Returns whether the host receives the stream of the cam worker. Without
-    /// a fresh report, the stream counts as idle.
+    /// Returns whether the host receives the stream of the cam worker. Returns
+    /// `Idle` without a fresh report.
     pub fn stream(&self) -> CamStream {
-        match self.observed() {
-            Reported::Fresh(report) => report.stream,
-            Reported::Pending | Reported::Lost => CamStream::Idle,
+        self.fresh().map_or(CamStream::Idle, |report| report.stream)
+    }
+
+    /// Returns the slate that the host gets, or else the slate of the armed
+    /// grant. Returns `None` if the exposure is not a slate or if the slate
+    /// has no id.
+    pub fn exposed_slate(&self) -> Option<SlateId> {
+        let exposed = self.exposed()?;
+        if exposed.exposure != OnAir::Canned {
+            return None;
+        }
+        match (self.fresh()?.output, self.armed()) {
+            (CamOutput::Slate(id), _) => id,
+            (_, Some(CamPermission::Slate(id))) => Some(id),
+            _ => None,
         }
     }
 }
@@ -119,12 +130,12 @@ pub enum CamPermission {
     /// A frame with nothing from the room.
     #[default]
     Blank,
-    /// A still card, chosen by its [`SlateId`].
+    /// A still image, chosen by its [`SlateId`].
     Slate(SlateId),
     /// The live camera. The worker shows a fallback image when frames stop.
     Live,
 }
 
-/// Identifies a configured slate. The daemon maps it to a slate name.
+/// The id of a configured slate. The daemon maps it to a slate name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SlateId(pub u16);

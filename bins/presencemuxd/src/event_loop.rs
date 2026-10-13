@@ -1,6 +1,7 @@
 //! The event loop and the leases that it renews.
 
 use std::fmt;
+use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,8 +22,8 @@ use crate::systemd;
 const CAPACITY: usize = 64;
 pub(crate) const TICK: Duration = Duration::from_millis(200);
 pub(crate) const LEASE: Duration = Duration::from_secs(1);
-/// The longest time between two reports of an owner. After it, the event loop
-/// reports the owner as lost.
+/// The longest time between two reports of an owner. After this time, the
+/// event loop reports the owner as lost.
 pub(crate) const REPORT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A time on `CLOCK_MONOTONIC`. Other processes on the same computer read
@@ -50,6 +51,14 @@ pub(crate) enum Owner {
     AudioWorker,
 }
 
+impl Add<Duration> for Monotonic {
+    type Output = Self;
+
+    fn add(self, duration: Duration) -> Self {
+        Self(self.0 + duration)
+    }
+}
+
 impl fmt::Display for Owner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -69,7 +78,7 @@ impl Owner {
     }
 }
 
-/// A target that the media layer may apply until `until`.
+/// A target that a worker may apply until `until`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Leased<T> {
     /// The start of this daemon run.
@@ -129,11 +138,11 @@ pub(crate) struct EventLoop {
 /// A time without a stream of the cam worker.
 #[derive(Debug)]
 struct StreamIdle {
-    since: Instant,
-    /// The epoch of the cam plane at `since`.
+    /// The epoch of the cam plane when the time started.
     epoch: Epoch,
-    /// Whether the event loop sent `StreamTimeout` for this time.
-    sent: bool,
+    /// The time at which the stream timeout lowers the cam plane. `None`
+    /// after the event loop sent `StreamTimeout` for this time.
+    deadline: Option<Monotonic>,
 }
 
 /// The time of the last report of an owner.
@@ -238,8 +247,8 @@ impl EventLoop {
         let (mic, mic_receiver) = watch::channel(clock.lease(controller.mic().target()));
         let conditions = Conditions::new(clock.now());
         let (status, status_receiver) =
-            watch::channel(status(&controller, &config.slates, None, &conditions));
-        let event_loop = Self {
+            watch::channel(status(&controller, &config.slates, None, &conditions, None));
+        let mut event_loop = Self {
             controller,
             config,
             preset: None,
@@ -253,6 +262,7 @@ impl EventLoop {
             reports: Vec::new(),
             stream_idle: None,
         };
+        event_loop.track_stream();
         let outputs = Outputs {
             cam: cam_receiver,
             mic: mic_receiver,
@@ -285,7 +295,7 @@ impl EventLoop {
                     }
                     last_tick = now;
                     self.check_reports(now);
-                    self.check_stream(now);
+                    self.check_stream();
                     self.renew();
                     if let Some(period) = self.watchdog
                         && last_ping.is_none_or(|last| now - last >= period)
@@ -382,34 +392,51 @@ impl EventLoop {
         self.observe(lost);
     }
 
-    /// Sends `StreamTimeout` once when the host has received no stream of the
-    /// cam worker for the stream timeout. A command for the cam plane starts
+    /// Starts, keeps or ends the time without a stream of the cam worker,
+    /// after a change of the controller. A command for the cam plane starts
     /// the time again.
-    fn check_stream(&mut self, now: Instant) {
-        let Some(timeout) = self.config.stream_timeout else {
-            return;
+    fn track_stream(&mut self) {
+        let timeout = match self.config.stream_timeout {
+            Some(timeout) if self.controller.cam().stream() == CamStream::Idle => timeout,
+            Some(_) | None => {
+                self.stream_idle = None;
+                return;
+            }
         };
-        if self.controller.cam().stream() == CamStream::Streaming {
-            self.stream_idle = None;
-            return;
-        }
         let epoch = self.controller.granted(PlaneId::Cam);
-        let idle = match &mut self.stream_idle {
-            Some(idle) if idle.epoch == epoch => idle,
-            slot => slot.insert(StreamIdle {
-                since: now,
+        if self
+            .stream_idle
+            .as_ref()
+            .is_none_or(|idle| idle.epoch != epoch)
+        {
+            self.stream_idle = Some(StreamIdle {
                 epoch,
-                sent: false,
-            }),
+                deadline: Some(self.clock.now() + timeout),
+            });
+        }
+    }
+
+    /// Returns the time at which the stream timeout lowers the cam plane, if
+    /// the event loop counts a time without a stream.
+    fn stream_deadline(&self) -> Option<Monotonic> {
+        self.stream_idle.as_ref()?.deadline
+    }
+
+    /// Sends `StreamTimeout` once when the time without a stream reaches its
+    /// deadline.
+    fn check_stream(&mut self) {
+        let now = self.clock.now();
+        let Some(idle) = &mut self.stream_idle else {
+            return;
         };
-        if idle.sent || now - idle.since < timeout {
+        if idle.deadline.is_none_or(|deadline| now < deadline) {
             return;
         }
-        idle.sent = true;
+        idle.deadline = None;
+        let epoch = idle.epoch;
         if self.controller.cam().desired() != CamPermission::Blank {
             tracing::info!(
-                "no stream of the cam worker for {} s, the cam plane goes to blank",
-                timeout.as_secs()
+                "no stream of the cam worker for the stream timeout, the cam plane goes to blank"
             );
         }
         self.observe([Observation::StreamTimeout(epoch)]);
@@ -441,6 +468,7 @@ impl EventLoop {
     /// whether the controller changed.
     fn apply(&mut self, event: Event) -> bool {
         let effects = self.controller.handle_input(event);
+        self.track_stream();
         self.send_leases(effects);
         effects.status_changed
     }
@@ -467,6 +495,7 @@ impl EventLoop {
             &self.config.slates,
             self.preset.as_ref(),
             &self.conditions,
+            self.stream_deadline(),
         );
         self.status.send_if_modified(|current| {
             let modified = *current != next;
@@ -489,14 +518,14 @@ impl Clock {
 
     /// Returns the time now.
     fn now(&self) -> Monotonic {
-        Monotonic(self.start.0 + self.started.elapsed())
+        self.start + self.started.elapsed()
     }
 
     fn lease<T>(&self, granted: Granted<T>) -> Leased<T> {
         Leased {
             session: self.start,
             granted,
-            until: Monotonic(self.now().0 + LEASE),
+            until: self.now() + LEASE,
         }
     }
 }
@@ -545,6 +574,17 @@ mod tests {
             };
             handle.observe(report).await.unwrap();
         }
+    }
+
+    /// Sends a report of the cam worker that applies its current grant, with
+    /// ready devices and no stream.
+    async fn apply_cam_grant(handle: &Handle, outputs: &Outputs) {
+        let applied = CamReport {
+            applied: Some(outputs.cam.borrow().granted),
+            ..CAM_READY
+        };
+        handle.observe(Observation::Cam(applied)).await.unwrap();
+        settle().await;
     }
 
     /// Sends a report of the cam worker with ready devices and `stream`.
@@ -940,6 +980,33 @@ mod tests {
         time::sleep(Duration::from_secs(20)).await;
 
         assert_eq!(outputs.cam.borrow().granted.permission, CamPermission::Live);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blank_time_is_the_stream_timeout_after_the_cam_command() {
+        let (_, handle, outputs) = start("[cam]\nstream_timeout = 45\n");
+        ready(&handle, &[PlaneId::Cam]).await;
+        time::sleep(Duration::from_secs(60)).await;
+        handle.request(cam(CamPermission::Live)).await.unwrap();
+        // The lease of the command ends 1 s after the command.
+        let commanded_at = outputs.cam.borrow().until.as_micros() - 1_000_000;
+
+        apply_cam_grant(&handle, &outputs).await;
+
+        assert_eq!(
+            outputs.status.borrow().cam.blank_at_usec,
+            Some(commanded_at + 45_000_000)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_timeout_ends_the_blank_time() {
+        let (handle, outputs) = start_with_live_cam("").await;
+        apply_cam_grant(&handle, &outputs).await;
+
+        time::sleep(Duration::from_secs(30) + 2 * TICK).await;
+
+        assert_eq!(outputs.status.borrow().cam.blank_at_usec, None);
     }
 
     #[tokio::test(start_paused = true)]

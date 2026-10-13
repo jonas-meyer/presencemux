@@ -2,13 +2,13 @@
 
 use crate::{
     Cam, CamPermission, CamStream, Cause, DeviceStatus, Epoch, Health, HostStatus, Mic, MicMute,
-    MicPermission, MicReport, PlaneState, PrivacyPlane, Report, Reported,
+    MicPermission, PlaneState, PrivacyPlane, Report, Reported,
 };
 
-/// Returns the effective cam permission. Live needs a ready camera and cam
-/// worker. A worker that exceeds its grant gets blank.
+/// Returns the effective cam permission. `Live` needs a ready camera and a
+/// ready cam worker. A worker that exceeds its grant gets `Blank`.
 pub(crate) fn cam(state: &PlaneState<Cam>) -> CamPermission {
-    let Reported::Fresh(report) = state.observed() else {
+    let Some(report) = state.fresh() else {
         return CamPermission::Blank;
     };
     if !report.worker.is_ready() || report.exceeded {
@@ -21,27 +21,22 @@ pub(crate) fn cam(state: &PlaneState<Cam>) -> CamPermission {
     }
 }
 
-/// Returns the effective mic permission. Permitted needs an unmuted mic, a
+/// Returns the effective mic permission. `Permitted` needs an unmuted mic, a
 /// ready audio interface and a ready gate. A gate that exceeds its grant gets
-/// denied.
+/// `Denied`.
 pub(crate) fn mic(state: &PlaneState<Mic>) -> MicPermission {
-    let devices_ready = match state.observed() {
-        Reported::Fresh(
-            report @ MicReport {
-                gate, interface, ..
-            },
-        ) => interface.is_ready() && gate.is_ready() && !report.exceeded,
-        Reported::Pending | Reported::Lost => false,
-    };
+    let devices_ready = state.fresh().is_some_and(|report| {
+        report.interface.is_ready() && report.gate.is_ready() && !report.exceeded
+    });
     match (state.desired(), devices_ready) {
         (MicMute::Unmuted, true) => MicPermission::Permitted,
         (MicMute::Unmuted, false) | (MicMute::Muted, _) => MicPermission::Denied,
     }
 }
 
-/// Returns `true` if a stream timeout with `epoch` lowers the cam plane: the
-/// epoch is not older than the last command for the cam plane, and the host
-/// receives no stream.
+/// Returns `true` if a stream timeout with `epoch` lowers the cam plane. The
+/// timeout lowers the plane if `epoch` is not older than the last command for
+/// the plane and the host receives no stream.
 pub(crate) fn stream_lowers(state: &PlaneState<Cam>, epoch: Epoch) -> bool {
     epoch >= state.epoch && state.stream() == CamStream::Idle
 }
@@ -89,7 +84,6 @@ fn device_lowers(before: DeviceStatus, after: DeviceStatus) -> bool {
         || (after == DeviceStatus::Fault && before != DeviceStatus::Fault)
 }
 
-/// Returns `true` if the host is no longer connected. A suspend counts too.
 /// Returns `true` if a resume applies the request of `plane` again. The plane
 /// must have a hold, the health of its owner must be `Ready`, and the host
 /// must be connected.
@@ -99,6 +93,8 @@ pub(crate) fn resumes<P: PrivacyPlane>(plane: &PlaneState<P>, host: HostStatus) 
         && host == HostStatus::Connected
 }
 
+/// Returns `true` if the host is no longer connected. A suspended host is not
+/// connected.
 pub(crate) fn host_lowers(before: HostStatus, after: HostStatus) -> bool {
     before == HostStatus::Connected && after != HostStatus::Connected
 }

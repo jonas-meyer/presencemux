@@ -16,7 +16,7 @@ proptest! {
 
         prop_assert_eq!(controller.plane(exceeded).granted, OnAir::Off);
         prop_assert_eq!(
-            controller.plane(exceeded).hold,
+            controller.plane(exceeded).hold(),
             hold_after_lowering(before.plane(exceeded), Cause::OutputExceeded(exceeded))
         );
         for other in PlaneId::ALL.into_iter().filter(|&p| p != exceeded) {

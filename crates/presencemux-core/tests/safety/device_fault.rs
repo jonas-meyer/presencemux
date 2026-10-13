@@ -21,7 +21,7 @@ proptest! {
         let lowered = controller.plane(failed.plane());
         prop_assert_eq!(lowered.granted, OnAir::Off);
         prop_assert_eq!(
-            lowered.hold,
+            lowered.hold(),
             hold_after_lowering(before.plane(failed.plane()), Cause::DeviceFault(failed))
         );
         for other in PlaneId::ALL.into_iter().filter(|&p| p != failed.plane()) {

@@ -19,7 +19,7 @@ proptest! {
         for plane in PlaneId::ALL {
             prop_assert_eq!(controller.plane(plane).granted, OnAir::Off);
             prop_assert_eq!(
-                controller.plane(plane).hold,
+                controller.plane(plane).hold(),
                 hold_after_lowering(before.plane(plane), Cause::Host(left))
             );
         }

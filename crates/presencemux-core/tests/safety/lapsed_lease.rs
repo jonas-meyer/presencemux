@@ -17,7 +17,7 @@ proptest! {
 
         prop_assert_eq!(controller.plane(lapsed).granted, OnAir::Off);
         prop_assert_eq!(
-            controller.plane(lapsed).hold,
+            controller.plane(lapsed).hold(),
             hold_after_lowering(before.plane(lapsed), Cause::ControllerStalled)
         );
         for other in PlaneId::ALL.into_iter().filter(|&p| p != lapsed) {
@@ -94,7 +94,7 @@ proptest! {
 
         prop_assert_eq!(controller.plane(lapsed).granted, OnAir::Off);
         prop_assert_eq!(
-            controller.plane(lapsed).hold,
+            controller.plane(lapsed).hold(),
             hold_after_lowering(before.plane(lapsed), Cause::ControllerStalled)
         );
         for other in PlaneId::ALL.into_iter().filter(|&p| p != lapsed) {

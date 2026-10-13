@@ -7,8 +7,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use presencemux_api::{
-    Cause, ControllerProxy, Device, Owner, OwnerStatus, PRESET_PRIVACY, Plane, ReportState,
-    SOCKET_PATH, Status,
+    Cause, ControllerProxy, Device, Exposure, Flow, Owner, OwnerStatus, Plane, Reason, ReportState,
+    SOCKET_PATH, Status, age,
 };
 use rustix::time::{ClockId, clock_gettime};
 use tokio_stream::StreamExt;
@@ -155,9 +155,8 @@ async fn run(cli: Cli) -> Result<(), Error> {
             connection.resume(plane).await??;
         }
         Command::Presets => {
-            writeln!(out, "{PRESET_PRIVACY}")?;
-            for name in connection.list_presets().await??.presets {
-                writeln!(out, "{name}")?;
+            for preset in connection.list_presets().await??.presets {
+                writeln!(out, "{}", preset.name)?;
             }
         }
     }
@@ -201,22 +200,17 @@ fn write_status(out: &mut impl Write, status: &Status, now_usec: i64) -> io::Res
         "cam           requested {}, granted {}",
         cam.requested, cam.granted
     )?;
-    write_actual(out, cam.actual.as_deref(), cam.in_effect)?;
-    write_latched(out, cam.latched)?;
-    write!(out, ", stream {}", cam.stream)?;
-    write_hold(out, cam.hold)?;
+    write_actual(out, cam.actual.as_deref())?;
+    write_state(out, cam.exposure, cam.flow, cam.reason, cam.hold)?;
+    writeln!(out, ", stream {}", cam.stream)?;
     write!(
         out,
         "mic           requested {}, granted {}",
         mic.requested, mic.granted
     )?;
-    write_actual(
-        out,
-        mic.actual.map(|actual| actual.to_string()).as_deref(),
-        mic.in_effect,
-    )?;
-    write_latched(out, mic.latched)?;
-    write_hold(out, mic.hold)?;
+    write_actual(out, mic.actual.map(|actual| actual.to_string()).as_deref())?;
+    write_state(out, mic.exposure, mic.flow, mic.reason, mic.hold)?;
+    writeln!(out)?;
     writeln!(out, "host          {host}")?;
     writeln!(out, "health        {health}")?;
     for owner in owners {
@@ -225,35 +219,28 @@ fn write_status(out: &mut impl Write, status: &Status, now_usec: i64) -> io::Res
     Ok(())
 }
 
-/// Writes the actual value of a plane, and `updating` while the worker
-/// applies an older grant.
-fn write_actual(out: &mut impl Write, actual: Option<&str>, in_effect: bool) -> io::Result<()> {
-    match actual {
-        Some(actual) => {
-            write!(out, ", actual {actual}")?;
-            if !in_effect {
-                write!(out, ", updating")?;
-            }
-            Ok(())
-        }
-        None => write!(out, ", actual unknown"),
-    }
+/// Writes the actual value of a plane.
+fn write_actual(out: &mut impl Write, actual: Option<&str>) -> io::Result<()> {
+    write!(out, ", actual {}", actual.unwrap_or("unknown"))
 }
 
-/// Writes `latched` if the worker blocks its output after a latch.
-fn write_latched(out: &mut impl Write, latched: bool) -> io::Result<()> {
-    if latched {
-        write!(out, ", latched")?;
+/// Writes the exposure of a plane while its flow is idle, and the reason why
+/// the exposure differs from the request. A hold shows with its cause.
+fn write_state(
+    out: &mut impl Write,
+    exposure: Option<Exposure>,
+    flow: Option<Flow>,
+    reason: Option<Reason>,
+    hold: Option<Cause>,
+) -> io::Result<()> {
+    if let (Some(exposure), Some(Flow::Idle)) = (exposure, flow) {
+        write!(out, ", idle at {exposure}")?;
     }
-    Ok(())
-}
-
-/// Writes the hold of a plane, if automation holds it, and ends the line.
-fn write_hold(out: &mut impl Write, hold: Option<Cause>) -> io::Result<()> {
-    if let Some(hold) = hold {
-        write!(out, ", held by {hold}")?;
+    match (reason, hold) {
+        (Some(Reason::Held), Some(cause)) => write!(out, ", held by {cause}"),
+        (Some(reason), _) => write!(out, ", {reason}"),
+        (None, _) => Ok(()),
     }
-    writeln!(out)
 }
 
 /// Writes the line of `owner` with the age of each condition, and its message
@@ -287,18 +274,6 @@ fn write_owner(out: &mut impl Write, owner: &OwnerStatus, now_usec: i64) -> io::
         writeln!(out, "              {message}")?;
     }
     Ok(())
-}
-
-/// Returns `micros` as a short age in the largest whole unit: seconds,
-/// minutes, hours or days.
-fn age(micros: i64) -> String {
-    let seconds = micros.max(0) / 1_000_000;
-    match seconds {
-        0..60 => format!("{seconds}s"),
-        60..3_600 => format!("{}m", seconds / 60),
-        3_600..86_400 => format!("{}h", seconds / 3_600),
-        _ => format!("{}d", seconds / 86_400),
-    }
 }
 
 #[cfg(test)]
@@ -375,18 +350,24 @@ mod tests {
                 requested: "brb".to_owned(),
                 granted: "blank".to_owned(),
                 actual: Some("blank".to_owned()),
-                in_effect: true,
-                latched: true,
+                exposure: Some(Exposure::Off),
+                slate: None,
+                flow: Some(Flow::Flowing),
+                reason: Some(Reason::Held),
                 hold: Some(Cause::CameraFault),
+                resumable: false,
                 stream: CamStream::Idle,
+                blank_at_usec: None,
             },
             mic: MicStatus {
                 requested: Mute::Muted,
                 granted: Permission::Denied,
                 actual: None,
-                in_effect: false,
-                latched: false,
+                exposure: None,
+                flow: None,
+                reason: None,
                 hold: None,
+                resumable: false,
             },
             owners: vec![
                 owner(
@@ -411,7 +392,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "preset        brb\n\
-             cam           requested brb, granted blank, actual blank, latched, stream idle, held by camera_fault\n\
+             cam           requested brb, granted blank, actual blank, held by camera_fault, stream idle\n\
              mic           requested muted, granted denied, actual unknown\n\
              host          connected\n\
              health        fault\n\
@@ -421,12 +402,28 @@ mod tests {
     }
 
     #[test]
-    fn actual_value_of_an_older_grant_shows_updating() {
+    fn plane_with_an_older_grant_shows_updating() {
         let mut out = Vec::new();
 
-        write_actual(&mut out, Some("live"), false).unwrap();
+        write_state(
+            &mut out,
+            Some(Exposure::Off),
+            Some(Flow::Flowing),
+            Some(Reason::Updating),
+            None,
+        )
+        .unwrap();
 
-        assert_eq!(String::from_utf8(out).unwrap(), ", actual live, updating");
+        assert_eq!(String::from_utf8(out).unwrap(), ", updating");
+    }
+
+    #[test]
+    fn idle_plane_shows_its_exposure() {
+        let mut out = Vec::new();
+
+        write_state(&mut out, Some(Exposure::Live), Some(Flow::Idle), None, None).unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), ", idle at live");
     }
 
     #[test]
@@ -443,20 +440,5 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "cam worker    lost for 5s\n              rejected the lease: late\n"
         );
-    }
-
-    #[test]
-    fn age_of_59_s_shows_in_seconds() {
-        assert_eq!(age(59_999_999), "59s");
-    }
-
-    #[test]
-    fn age_of_90_min_shows_in_hours() {
-        assert_eq!(age(5_400_000_000), "1h");
-    }
-
-    #[test]
-    fn age_of_a_condition_from_the_future_shows_as_0_s() {
-        assert_eq!(age(-1), "0s");
     }
 }

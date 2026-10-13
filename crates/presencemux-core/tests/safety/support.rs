@@ -25,7 +25,7 @@ pub(crate) fn after(events: impl IntoIterator<Item = Event>) -> Controller {
 /// Returns the highest level that a plane can reach. It is `Off` while
 /// automation holds the plane, and the request otherwise.
 pub(crate) fn held_level(summary: PlaneSummary) -> OnAir {
-    if summary.hold.is_some() {
+    if summary.hold().is_some() {
         OnAir::Off
     } else {
         summary.requested
@@ -35,10 +35,10 @@ pub(crate) fn held_level(summary: PlaneSummary) -> OnAir {
 /// Returns the hold of a plane after automation lowers it. A plane that was
 /// held or not requested keeps its hold.
 pub(crate) fn hold_after_lowering(before: PlaneSummary, cause: Cause) -> Option<Cause> {
-    if before.hold.is_none() && before.requested > OnAir::Off {
+    if before.hold().is_none() && before.requested > OnAir::Off {
         Some(cause)
     } else {
-        before.hold
+        before.hold()
     }
 }
 
@@ -291,13 +291,13 @@ fn mic() -> impl Strategy<Value = MicMute> {
     prop_oneof![Just(MicMute::Muted), Just(MicMute::Unmuted)]
 }
 
-/// Any preset, also one that no configuration has.
+/// Returns any preset, also one that no configuration has.
 pub(crate) fn preset() -> impl Strategy<Value = Preset> {
     (proptest::option::of(cam()), proptest::option::of(mic()))
         .prop_map(|(cam, mic)| Preset { cam, mic })
 }
 
-/// A preset that sets the plane.
+/// Returns a preset that sets `plane`.
 pub(crate) fn preset_setting(plane: PlaneId) -> BoxedStrategy<Preset> {
     match plane {
         PlaneId::Cam => (cam(), proptest::option::of(mic()))
@@ -315,7 +315,7 @@ pub(crate) fn preset_setting(plane: PlaneId) -> BoxedStrategy<Preset> {
     }
 }
 
-/// A preset that does not set the plane.
+/// Returns a preset that does not set `plane`.
 pub(crate) fn preset_without(plane: PlaneId) -> BoxedStrategy<Preset> {
     match plane {
         PlaneId::Cam => proptest::option::of(mic())

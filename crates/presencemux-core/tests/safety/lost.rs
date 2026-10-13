@@ -14,7 +14,7 @@ proptest! {
 
         prop_assert_eq!(controller.plane(lost).granted, OnAir::Off);
         prop_assert_eq!(
-            controller.plane(lost).hold,
+            controller.plane(lost).hold(),
             hold_after_lowering(before.plane(lost), Cause::OwnerLost(lost))
         );
         for other in PlaneId::ALL.into_iter().filter(|&p| p != lost) {

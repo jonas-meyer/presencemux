@@ -125,9 +125,16 @@ impl Config {
         })
     }
 
-    /// Returns the names of the configured presets, in order.
-    pub(crate) fn preset_names(&self) -> impl Iterator<Item = &str> {
-        self.presets.keys().map(PresetName::as_str)
+    /// Returns each preset with its values. The built-in `privacy` comes first,
+    /// then the configured presets in name order.
+    pub(crate) fn presets(&self) -> impl Iterator<Item = (&str, Preset)> {
+        let configured = self
+            .presets
+            .iter()
+            .map(|(name, preset)| (name.as_str(), *preset));
+        [(PRESET_PRIVACY, Preset::PRIVACY)]
+            .into_iter()
+            .chain(configured)
     }
 
     /// Returns the preset that an API name refers to.
@@ -255,6 +262,9 @@ struct File {
     presets: BTreeMap<PresetName, PresetFile>,
     #[serde(default)]
     cam: CamTable,
+    #[expect(dead_code, reason = "presencemux-deck owns the content of the section")]
+    #[serde(default)]
+    deck: IgnoredAny,
 }
 
 /// The default stream timeout in seconds.
@@ -365,6 +375,13 @@ mod tests {
 
         let brb = config.slates.id("brb").unwrap();
         assert_eq!(config.presets["brb"].cam, Some(CamPermission::Slate(brb)));
+    }
+
+    #[test]
+    fn deck_section_is_accepted() {
+        let result = Config::parse("[deck]\nbrightness = 60\nkeys = [\"resume\"]\n");
+
+        assert!(result.is_ok());
     }
 
     #[test]

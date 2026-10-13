@@ -26,19 +26,17 @@ fn ready(controller: &Controller, plane: PlaneId) -> bool {
 
 proptest! {
     #[test]
-    fn clears_a_hold_only_with_ready_devices_and_a_connected_host(
+    fn clears_a_hold_exactly_with_ready_devices_and_a_connected_host(
         prefix in events(),
         resumed in plane(),
     ) {
         let mut controller = after(prefix);
-        let before = controller.clone();
+        prop_assume!(controller.plane(resumed).hold().is_some());
+        let allowed = controller.host() == HostStatus::Connected && ready(&controller, resumed);
 
         let _ = controller.handle_input(Command::Resume(resumed).into());
 
-        if before.plane(resumed).hold.is_some() && controller.plane(resumed).hold.is_none() {
-            prop_assert_eq!(before.host(), HostStatus::Connected);
-            prop_assert!(ready(&before, resumed));
-        }
+        prop_assert_eq!(controller.plane(resumed).hold().is_none(), allowed);
     }
 
     #[test]

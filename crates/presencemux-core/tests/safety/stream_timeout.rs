@@ -17,7 +17,7 @@ proptest! {
 
         prop_assert_eq!(controller.plane(PlaneId::Cam).granted, OnAir::Off);
         prop_assert_eq!(
-            controller.plane(PlaneId::Cam).hold,
+            controller.plane(PlaneId::Cam).hold(),
             hold_after_lowering(before.plane(PlaneId::Cam), Cause::StreamStopped)
         );
         prop_assert_eq!(controller.plane(PlaneId::Mic), before.plane(PlaneId::Mic));

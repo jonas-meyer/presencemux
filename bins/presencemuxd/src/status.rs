@@ -3,7 +3,10 @@
 use presencemux_api::{
     self as api, CamStatus, Cause, DeviceCondition, MicStatus, OwnerStatus, ReportState, Status,
 };
-use presencemux_core::{CamOutput, CamPermission, Controller, Plane, PlaneState, Report, Reported};
+use presencemux_core::{
+    CamOutput, CamPermission, Controller, Exposed, OnAir, Plane, PlaneId, PlaneState, Report,
+    Reported,
+};
 
 use crate::config::{PresetRef, Slates};
 use crate::event_loop::{Monotonic, Owner};
@@ -103,34 +106,48 @@ where
 }
 
 /// Returns the status of the controller in API types.
+///
+/// `stream_deadline` is the time at which the stream timeout lowers the cam
+/// plane, if the event loop counts a time without a stream.
 pub(crate) fn status(
     controller: &Controller,
     slates: &Slates,
     preset: Option<&PresetRef>,
     conditions: &Conditions,
+    stream_deadline: Option<Monotonic>,
 ) -> Status {
     let cam = controller.cam();
     let mic = controller.mic();
+    let cam_summary = controller.plane(PlaneId::Cam);
+    let mic_summary = controller.plane(PlaneId::Mic);
     Status {
         cam: CamStatus {
             requested: slates.cam_value(cam.requested()).to_owned(),
             granted: slates.cam_value(cam.target().permission).to_owned(),
-            actual: cam_output(cam, slates),
-            in_effect: cam.summary().in_effect,
-            latched: latched(cam),
-            hold: cam.hold().map(Cause::from),
+            actual: cam
+                .fresh()
+                .map(|report| cam_output(report.output, slates).to_owned()),
+            exposure: cam_summary.exposed.map(|exposed| exposed.exposure.into()),
+            slate: cam
+                .exposed_slate()
+                .and_then(|id| slates.name(id))
+                .map(str::to_owned),
+            flow: cam_summary.exposed.map(|exposed| exposed.flow().into()),
+            reason: cam_summary.reason.map(Into::into),
+            hold: cam_summary.hold().map(Cause::from),
+            resumable: cam_summary.resumable,
             stream: cam.stream().into(),
+            blank_at_usec: blank_at(cam_summary.exposed, stream_deadline),
         },
         mic: MicStatus {
             requested: mic.requested().into(),
             granted: mic.target().permission.into(),
-            actual: match mic.observed() {
-                Reported::Fresh(report) => Some(report.output.into()),
-                Reported::Pending | Reported::Lost => None,
-            },
-            in_effect: mic.summary().in_effect,
-            latched: latched(mic),
-            hold: mic.hold().map(Cause::from),
+            actual: mic.fresh().map(|report| report.output.into()),
+            exposure: mic_summary.exposed.map(|exposed| exposed.exposure.into()),
+            flow: mic_summary.exposed.map(|exposed| exposed.flow().into()),
+            reason: mic_summary.reason.map(Into::into),
+            hold: mic_summary.hold().map(Cause::from),
+            resumable: mic_summary.resumable,
         },
         owners: vec![conditions.cam.clone(), conditions.audio.clone()],
         host: controller.host().into(),
@@ -139,29 +156,24 @@ pub(crate) fn status(
     }
 }
 
-/// Returns whether the last fresh report of the owner of the devices of
-/// `plane` has a latch.
-fn latched<P: Plane>(plane: &PlaneState<P>) -> bool
-where
-    P::Report: Report,
-{
-    matches!(plane.observed(), Reported::Fresh(report) if report.latched().is_some())
-}
-
-/// Returns the output of the cam worker as a cam value, or `None` without a
-/// fresh report.
-fn cam_output(state: &PlaneState<presencemux_core::Cam>, slates: &Slates) -> Option<String> {
-    let Reported::Fresh(report) = state.observed() else {
-        return None;
-    };
-    let value = match report.output {
+/// Returns the output of the cam worker as a cam value.
+fn cam_output(output: CamOutput, slates: &Slates) -> &str {
+    match output {
         CamOutput::Nothing => api::CAM_NOTHING,
         CamOutput::Blank => slates.cam_value(CamPermission::Blank),
         CamOutput::Slate(Some(id)) => slates.cam_value(CamPermission::Slate(id)),
         CamOutput::Slate(None) => api::CAM_SLATE,
         CamOutput::Live => slates.cam_value(CamPermission::Live),
-    };
-    Some(value.to_owned())
+    }
+}
+
+/// Returns the time at which the stream timeout lowers the cam plane, in
+/// microseconds. The time is `stream_deadline` while the cam exposure is above
+/// off.
+fn blank_at(exposed: Option<Exposed>, stream_deadline: Option<Monotonic>) -> Option<i64> {
+    stream_deadline
+        .filter(|_| exposed.is_some_and(|exposed| exposed.exposure > OnAir::Off))
+        .map(Monotonic::as_micros)
 }
 
 #[cfg(test)]
@@ -206,7 +218,13 @@ mod tests {
         let config = Config::parse("").unwrap();
         let (controller, _) = Controller::new();
 
-        let status = status(&controller, &config.slates, None, &Conditions::new(BOOT));
+        let status = status(
+            &controller,
+            &config.slates,
+            None,
+            &Conditions::new(BOOT),
+            None,
+        );
 
         assert_eq!(
             (status.cam, status.mic, status.host, status.health),
@@ -215,18 +233,24 @@ mod tests {
                     requested: "blank".to_owned(),
                     granted: "blank".to_owned(),
                     actual: None,
-                    in_effect: false,
-                    latched: false,
+                    exposure: None,
+                    slate: None,
+                    flow: None,
+                    reason: None,
                     hold: None,
+                    resumable: false,
                     stream: CamStream::Idle,
+                    blank_at_usec: None,
                 },
                 MicStatus {
                     requested: Mute::Muted,
                     granted: Permission::Denied,
                     actual: None,
-                    in_effect: false,
-                    latched: false,
+                    exposure: None,
+                    flow: None,
+                    reason: None,
                     hold: None,
+                    resumable: false,
                 },
                 Host::Disconnected,
                 Health::Degraded,
@@ -239,7 +263,13 @@ mod tests {
         let config = Config::parse("").unwrap();
         let (controller, _) = Controller::new();
 
-        let status = status(&controller, &config.slates, None, &Conditions::new(BOOT));
+        let status = status(
+            &controller,
+            &config.slates,
+            None,
+            &Conditions::new(BOOT),
+            None,
+        );
 
         let unknown = |device| DeviceCondition {
             device,
@@ -286,7 +316,13 @@ mod tests {
             .into(),
         );
 
-        let status = status(&controller, &config.slates, None, &Conditions::new(BOOT));
+        let status = status(
+            &controller,
+            &config.slates,
+            None,
+            &Conditions::new(BOOT),
+            None,
+        );
 
         assert_eq!(status.cam.requested, "brb");
     }
@@ -302,7 +338,13 @@ mod tests {
         };
         let _ = controller.handle_input(Observation::Cam(report).into());
 
-        let status = status(&controller, &config.slates, None, &Conditions::new(BOOT));
+        let status = status(
+            &controller,
+            &config.slates,
+            None,
+            &Conditions::new(BOOT),
+            None,
+        );
 
         assert_eq!(status.cam.actual.as_deref(), Some("nothing"));
     }
@@ -321,24 +363,86 @@ mod tests {
         };
         let _ = controller.handle_input(Observation::Mic(report).into());
 
-        let status = status(&controller, &config.slates, None, &Conditions::new(BOOT));
+        let status = status(
+            &controller,
+            &config.slates,
+            None,
+            &Conditions::new(BOOT),
+            None,
+        );
 
         assert_eq!(status.mic.actual, Some(MicOutput::Silent));
     }
 
     #[test]
-    fn latched_report_shows_the_plane_latched() {
+    fn armed_cam_gives_the_stream_deadline_as_blank_time() {
         let config = Config::parse("").unwrap();
         let (mut controller, _) = Controller::new();
+        let ready = cam_report(DeviceStatus::Ready, DeviceStatus::Ready);
+        let _ = controller.handle_input(Observation::Cam(ready).into());
+        let _ = controller.handle_input(
+            Command::Apply(Preset {
+                cam: Some(CamPermission::Live),
+                mic: None,
+            })
+            .into(),
+        );
         let report = CamReport {
-            latched: Some(presencemux_core::Epoch::BOOT),
+            output: CamOutput::Nothing,
+            applied: Some(controller.cam().target()),
+            ..ready
+        };
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        let status = status(
+            &controller,
+            &config.slates,
+            None,
+            &Conditions::new(BOOT),
+            Some(Monotonic::from_duration(Duration::from_secs(55))),
+        );
+
+        assert_eq!(status.cam.blank_at_usec, Some(55_000_000));
+    }
+
+    #[test]
+    fn cam_off_air_has_no_blank_time() {
+        let config = Config::parse("").unwrap();
+        let (mut controller, _) = Controller::new();
+        let ready = cam_report(DeviceStatus::Ready, DeviceStatus::Ready);
+        let _ = controller.handle_input(Observation::Cam(ready).into());
+
+        let status = status(
+            &controller,
+            &config.slates,
+            None,
+            &Conditions::new(BOOT),
+            Some(LATER),
+        );
+
+        assert_eq!(status.cam.blank_at_usec, None);
+    }
+
+    #[test]
+    fn exposed_slate_has_its_name() {
+        let config = Config::parse("[slates.brb]\n").unwrap();
+        let brb = config.slates.id("brb").unwrap();
+        let (mut controller, _) = Controller::new();
+        let report = CamReport {
+            output: CamOutput::Slate(Some(brb)),
             ..cam_report(DeviceStatus::Ready, DeviceStatus::Ready)
         };
         let _ = controller.handle_input(Observation::Cam(report).into());
 
-        let status = status(&controller, &config.slates, None, &Conditions::new(BOOT));
+        let status = status(
+            &controller,
+            &config.slates,
+            None,
+            &Conditions::new(BOOT),
+            None,
+        );
 
-        assert!(status.cam.latched);
+        assert_eq!(status.cam.slate.as_deref(), Some("brb"));
     }
 
     #[test]
@@ -351,7 +455,13 @@ mod tests {
         };
         let _ = controller.handle_input(Observation::Cam(report).into());
 
-        let status = status(&controller, &config.slates, None, &Conditions::new(BOOT));
+        let status = status(
+            &controller,
+            &config.slates,
+            None,
+            &Conditions::new(BOOT),
+            None,
+        );
 
         assert_eq!(status.cam.actual.as_deref(), Some("slate"));
     }

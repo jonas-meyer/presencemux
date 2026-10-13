@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use presencemux_api::{
-    CamStatus, CamStream, Cause, Device, DeviceCondition, DeviceStatus, Error, Health, Host,
-    MicOutput, MicStatus, Mute, Owner, OwnerStatus, Permission, Plane, Presets, ReportState,
-    Status,
+    CamStatus, CamStream, Cause, Device, DeviceCondition, DeviceStatus, Error, Exposure, Flow,
+    Health, Host, MicOutput, MicStatus, Mute, Owner, OwnerStatus, Permission, Plane, PresetValues,
+    Presets, Reason, ReportState, Status,
 };
 use presencemux_core::{MicMute, Preset};
 use rustix::io::Errno;
@@ -22,9 +22,8 @@ use zlink::{ReadyListener, Reply, Server};
 use crate::config::Config;
 use crate::event_loop::{Handle, HandleError, Request};
 
-/// The number of clients that the daemon serves at the same time. Further
-/// clients wait in the socket backlog. The limit keeps file descriptors free
-/// for the daemon itself, for example for the watchdog ping.
+/// The largest number of clients that the daemon serves at the same time.
+/// Further clients wait in the socket backlog.
 pub(crate) const MAX_CONNECTIONS: usize = 256;
 
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
@@ -144,6 +143,10 @@ fn wire_error(error: HandleError) -> Error {
         Mute,
         Permission,
         Plane,
+        Exposure,
+        Flow,
+        Reason,
+        PresetValues,
         Host,
         Health,
         Cause
@@ -210,16 +213,27 @@ impl Service {
     }
 
     /// Applies the request of a held plane again. The devices of the plane must
-    /// be ready, and the host must be connected. Otherwise it does nothing.
+    /// be ready, and the host must be connected. Otherwise the method does
+    /// nothing.
     async fn resume(&self, plane: Plane) -> Result<(), Error> {
         self.handle.resume(plane.into()).await.map_err(wire_error)
     }
 
-    /// Returns the names of the configured presets. The list does not include
-    /// the built-in `privacy`.
+    /// Returns each preset with its values: first the built-in `privacy`, then
+    /// the configured presets.
     async fn list_presets(&self) -> Presets {
         Presets {
-            presets: self.config.preset_names().map(str::to_owned).collect(),
+            presets: self
+                .config
+                .presets()
+                .map(|(name, preset)| PresetValues {
+                    name: name.to_owned(),
+                    cam: preset
+                        .cam
+                        .map(|cam| self.config.slates.cam_value(cam).to_owned()),
+                    mic: preset.mic.map(Into::into),
+                })
+                .collect(),
         }
     }
 }
@@ -325,14 +339,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]
-    async fn list_presets_returns_the_configured_names() {
-        let mut client = connect(&start(
-            "[presets.talk]\nmic = \"unmuted\"\n\n[presets.brb]\nmic = \"muted\"\n",
-        ));
+    async fn list_presets_returns_privacy_then_the_configured_presets() {
+        let mut client = connect(&start("[presets.talk]\nmic = \"unmuted\"\n"));
 
         let presets = client.list_presets().await.unwrap().unwrap();
 
-        assert_eq!(presets.presets, ["brb", "talk"]);
+        assert_eq!(
+            presets.presets,
+            [
+                PresetValues {
+                    name: "privacy".to_owned(),
+                    cam: Some("blank".to_owned()),
+                    mic: Some(Mute::Muted),
+                },
+                PresetValues {
+                    name: "talk".to_owned(),
+                    cam: None,
+                    mic: Some(Mute::Unmuted),
+                },
+            ]
+        );
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]

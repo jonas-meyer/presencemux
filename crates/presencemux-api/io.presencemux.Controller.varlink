@@ -1,17 +1,24 @@
 #  Controls the privacy of the camera and the microphone.
 interface io.presencemux.Controller
 
-#  The state of the cam plane. Its values are `blank`, `live` or a slate name.
+#  The state of the cam plane. A cam value is `blank`, `live` or a slate name.
 type CamStatus (#  The value that the user asked for.
 requested: string, #  The value that the controller grants the cam worker.
 granted: string, #  The frames that the host gets, as the cam worker reports them. `nothing`
 #  means no stream. Null without a fresh report.
-actual: ?string, #  Whether the cam worker applies the grant of the controller.
-inEffect: bool, #  Whether the cam worker blocks live video after a latch.
-latched: bool, #  Why automation holds the plane at blank. Null after the user sets the
+actual: ?string, #  What the host can get without a press. Null without a fresh report.
+exposure: ?Exposure, #  The name of the slate of `exposure`. Null for another exposure, or for a
+#  slate without a name in the configuration.
+slate: ?string, #  Whether the host gets the exposure now. Null without a fresh report.
+flow: ?Flow, #  Why the exposure differs from the request. Null if it does not.
+reason: ?Reason, #  Why automation holds the plane at blank. Null after the user sets the
 #  plane.
-hold: ?Cause, #  Whether the host receives the stream of the cam worker.
-stream: CamStream)
+hold: ?Cause, #  Whether `Resume` applies the request again now.
+resumable: bool, #  Whether the host receives the stream of the cam worker.
+stream: CamStream, #  The time at which the stream timeout sets the cam to blank, in
+#  `CLOCK_MONOTONIC` microseconds. Null unless the host receives no stream
+#  while the exposure is above off.
+blankAtUSec: ?int)
 
 #  Whether the host receives the stream of the cam worker.
 type CamStream (idle, streaming)
@@ -21,18 +28,20 @@ type MicStatus (#  The value that the user asked for.
 requested: Mute, #  Whether the controller lets the gate pass audio.
 granted: Permission, #  The audio that the host gets, as the audio worker reports it. Null
 #  without a fresh report.
-actual: ?MicOutput, #  Whether the audio worker applies the grant of the controller.
-inEffect: bool, #  Whether the gate blocks the audio after a latch.
-latched: bool, #  Why automation holds the plane at muted. Null after the user sets the
+actual: ?MicOutput, #  What the host can get without a press. Null without a fresh report.
+exposure: ?Exposure, #  Whether the host gets the exposure now. Null without a fresh report.
+flow: ?Flow, #  Why the exposure differs from the request. Null if it does not.
+reason: ?Reason, #  Why automation holds the plane at muted. Null after the user sets the
 #  plane.
-hold: ?Cause)
+hold: ?Cause, #  Whether `Resume` applies the request again now.
+resumable: bool)
 
 #  The audio that the host gets.
 type MicOutput (
 	#  The gate writes digital silence.
 	silent,
 	#  The gate passes audio with a falling gain, after a lease that closes
-	#  it.
+	#  the gate.
 	closing,
 	#  The gate passes audio while it opens or is open.
 	passing
@@ -77,14 +86,45 @@ type Permission (denied, permitted)
 #  A privacy plane.
 type Plane (cam, mic)
 
-#  The USB connection to the computer on the other side of the gadget.
+#  What the host can get from a plane without a press. The exposure is the
+#  higher of the actual output and the grant that the worker applies. A
+#  latched worker exposes only its actual output.
+type Exposure (off, slate, live)
+
+#  Whether the host gets the exposure of a plane now.
+type Flow (
+	flowing,
+	#  The host gets less than the exposure, for example because no app reads
+	#  the stream.
+	idle
+)
+
+#  Why the exposure of a plane differs from its request.
+type Reason (
+	#  Automation holds the plane. `hold` gives the cause.
+	held,
+	#  The worker applies an older grant.
+	updating,
+	#  The latch of the worker blocks the grant.
+	blocked,
+	#  The controller grants less than the request, for example while a
+	#  device is not ready.
+	waiting
+)
+
+#  A preset and the values that it sets. A missing value leaves its plane as it
+#  is.
+type PresetValues (name: string, #  `blank`, `live` or a slate name.
+cam: ?string, mic: ?Mute)
+
+#  The state of the USB connection to the host.
 type Host (disconnected, suspended, connected)
 
 #  The health of the devices. `degraded` means that a device is missing or
 #  not ready yet, or that a worker has not reported yet.
 type Health (ready, degraded, fault)
 
-#  The reason why automation lowered a plane.
+#  Why automation lowered a plane.
 type Cause (
 	camera_fault,
 	cam_worker_fault,
@@ -129,12 +169,13 @@ method SetCam(cam: string) -> ()
 method SetMicMute(muted: bool) -> ()
 
 #  Applies the request of a held plane again. The devices of the plane must
-#  be ready, and the host must be connected. Otherwise it does nothing.
+#  be ready, and the host must be connected. Otherwise the method does
+#  nothing.
 method Resume(plane: Plane) -> ()
 
-#  Returns the names of the configured presets. The list does not include
-#  the built-in `privacy`.
-method ListPresets() -> (presets: []string)
+#  Returns each preset with its values: first the built-in `privacy`, then
+#  the configured presets.
+method ListPresets() -> (presets: []PresetValues)
 
 #  The preset is not `privacy` or a configured preset.
 error NoSuchPreset ()

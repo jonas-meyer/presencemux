@@ -19,7 +19,10 @@ pub use device::{Device, DeviceStatus, Health};
 pub use host::HostStatus;
 pub use mic::{Mic, MicMute, MicOutput, MicPermission, MicReport};
 pub use on_air::OnAir;
-pub use plane::{Cause, Epoch, Granted, Plane, PlaneId, PlaneState, PlaneSummary, PrivacyPlane};
+pub use plane::{
+    Cause, Epoch, Exposed, Flow, Granted, Plane, PlaneId, PlaneState, PlaneSummary, PrivacyPlane,
+    Reason,
+};
 pub use preset::Preset;
 pub use report::{Report, Reported};
 
@@ -33,8 +36,8 @@ pub enum Event {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Apply(Preset),
-    /// Applies the request of a held plane again. Acts only while the plane
-    /// has a hold, the health of its owner is `Ready` and the host is
+    /// Applies the request of a held plane again. It has no effect unless the
+    /// plane has a hold, the health of its owner is `Ready` and the host is
     /// connected.
     Resume(PlaneId),
 }
@@ -48,8 +51,8 @@ pub enum Observation {
     Mic(MicReport),
     /// The daemon has no contact with the owner of the devices of this plane.
     Lost(PlaneId),
-    /// A lease of this plane lapsed. The media layer or the event loop reports
-    /// it, with the epoch of the lease. A lapse with an epoch older than the
+    /// A lease of this plane lapsed. The event loop reports it, with the epoch
+    /// of the lease. A lapse with an epoch older than the
     /// last command for this plane has no effect.
     LeaseExpired(PlaneId, Epoch),
     Host(HostStatus),
@@ -191,8 +194,8 @@ impl Controller {
 
     pub fn plane(&self, id: PlaneId) -> PlaneSummary {
         match id {
-            PlaneId::Cam => self.cam.summary(),
-            PlaneId::Mic => self.mic.summary(),
+            PlaneId::Cam => self.cam.summary(self.host),
+            PlaneId::Mic => self.mic.summary(self.host),
         }
     }
 
@@ -392,6 +395,184 @@ mod tests {
             controller.mic().hold(),
             Some(Cause::DeviceFault(Device::AudioInterface))
         );
+    }
+
+    /// Returns a cam report of ready devices that applies the cam target of
+    /// `controller`, with the output `output`.
+    fn applying(controller: &Controller, output: CamOutput) -> Event {
+        Observation::Cam(CamReport {
+            output,
+            applied: Some(controller.cam().target()),
+            ..cam(Ready, Ready)
+        })
+        .into()
+    }
+
+    #[test]
+    fn applied_live_grant_without_a_stream_exposes_live() {
+        let mut controller = live_controller();
+
+        let _ = controller.handle_input(applying(&controller, CamOutput::Nothing));
+
+        assert_eq!(
+            controller
+                .plane(PlaneId::Cam)
+                .exposed
+                .map(|exposed| exposed.exposure),
+            Some(OnAir::Live)
+        );
+    }
+
+    #[test]
+    fn applied_live_grant_without_a_stream_is_idle() {
+        let mut controller = live_controller();
+
+        let _ = controller.handle_input(applying(&controller, CamOutput::Nothing));
+
+        assert_eq!(
+            controller.plane(PlaneId::Cam).exposed.map(Exposed::flow),
+            Some(Flow::Idle)
+        );
+    }
+
+    #[test]
+    fn latched_owner_exposes_only_its_output() {
+        let mut controller = live_controller();
+        let report = CamReport {
+            latched: Some(controller.cam().target().epoch),
+            output: CamOutput::Blank,
+            applied: Some(controller.cam().target()),
+            ..cam(Ready, Ready)
+        };
+
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        assert_eq!(
+            controller
+                .plane(PlaneId::Cam)
+                .exposed
+                .map(|exposed| exposed.exposure),
+            Some(OnAir::Off)
+        );
+    }
+
+    #[test]
+    fn latched_owner_below_its_grant_gives_blocked() {
+        let mut controller = live_controller();
+        let report = CamReport {
+            latched: Some(Epoch::BOOT),
+            output: CamOutput::Blank,
+            applied: Some(controller.cam().target()),
+            ..cam(Ready, Ready)
+        };
+
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        assert_eq!(controller.plane(PlaneId::Cam).reason, Some(Reason::Blocked));
+    }
+
+    #[test]
+    fn owner_with_an_older_grant_gives_updating() {
+        let mut controller = live_controller();
+        let report = CamReport {
+            applied: Some(Granted {
+                permission: CamPermission::Blank,
+                epoch: Epoch::BOOT,
+            }),
+            ..cam(Ready, Ready)
+        };
+
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        assert_eq!(
+            controller.plane(PlaneId::Cam).reason,
+            Some(Reason::Updating)
+        );
+    }
+
+    #[test]
+    fn request_above_the_grant_gives_waiting() {
+        let mut controller = after(&[
+            Observation::Cam(cam(Ready, Missing)).into(),
+            Observation::Mic(mic(Ready, Ready)).into(),
+            live(),
+        ]);
+
+        let report = CamReport {
+            applied: Some(controller.cam().target()),
+            ..cam(Ready, Missing)
+        };
+
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        assert_eq!(controller.plane(PlaneId::Cam).reason, Some(Reason::Waiting));
+    }
+
+    #[test]
+    fn held_plane_gives_its_hold_as_the_reason() {
+        let controller = held_controller();
+
+        assert_eq!(
+            controller.plane(PlaneId::Cam).reason,
+            Some(Reason::Held(Cause::DeviceFault(Device::Camera)))
+        );
+    }
+
+    #[test]
+    fn latched_owner_at_its_grant_gives_no_reason() {
+        let mut controller = live_controller();
+        let report = CamReport {
+            latched: Some(Epoch::BOOT),
+            output: CamOutput::Live,
+            applied: Some(controller.cam().target()),
+            ..cam(Ready, Ready)
+        };
+
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        assert_eq!(controller.plane(PlaneId::Cam).reason, None);
+    }
+
+    #[test]
+    fn hold_is_the_reason_while_the_owner_applies_an_older_grant() {
+        let mut controller = held_controller();
+        let report = CamReport {
+            applied: Some(Granted {
+                permission: CamPermission::Blank,
+                epoch: Epoch::BOOT,
+            }),
+            ..cam(Ready, Ready)
+        };
+
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        assert_eq!(
+            controller.plane(PlaneId::Cam).reason,
+            Some(Reason::Held(Cause::DeviceFault(Device::Camera)))
+        );
+    }
+
+    #[test]
+    fn held_plane_is_not_resumable_while_the_host_is_disconnected() {
+        let mut controller = held_controller();
+
+        let _ = controller.handle_input(Observation::Host(HostStatus::Disconnected).into());
+
+        assert!(!controller.plane(PlaneId::Cam).resumable);
+    }
+
+    #[test]
+    fn owner_without_a_report_gives_no_reason() {
+        let (controller, _) = Controller::new();
+
+        assert_eq!(controller.plane(PlaneId::Cam).reason, None);
+    }
+
+    #[test]
+    fn held_plane_with_ready_devices_and_a_connected_host_is_resumable() {
+        let controller = held_controller();
+
+        assert!(controller.plane(PlaneId::Cam).resumable);
     }
 
     #[test]
@@ -638,10 +819,10 @@ mod tests {
     }
 
     #[test]
-    fn actual_level_is_unknown_while_the_owner_is_lost() {
+    fn exposure_is_unknown_while_the_owner_is_lost() {
         let controller = after(&[Observation::Lost(PlaneId::Cam).into()]);
 
-        assert_eq!(controller.plane(PlaneId::Cam).actual, None);
+        assert_eq!(controller.plane(PlaneId::Cam).exposed, None);
     }
 
     #[test]
@@ -652,38 +833,63 @@ mod tests {
         };
         let controller = after(&[Observation::Cam(report).into()]);
 
-        assert_eq!(controller.plane(PlaneId::Cam).actual, Some(OnAir::Canned));
+        assert_eq!(
+            controller
+                .plane(PlaneId::Cam)
+                .exposed
+                .map(|exposed| exposed.actual),
+            Some(OnAir::Canned)
+        );
     }
 
     #[test]
-    fn target_is_in_effect_when_the_owner_applies_it() {
+    fn owner_that_applies_the_target_gives_no_reason() {
         let mut controller = live_controller();
-        let report = CamReport {
-            output: CamOutput::Live,
-            exceeded: false,
-            applied: Some(controller.cam().target()),
-            ..cam(Ready, Ready)
-        };
 
-        let _ = controller.handle_input(Observation::Cam(report).into());
+        let _ = controller.handle_input(applying(&controller, CamOutput::Live));
 
-        assert!(controller.plane(PlaneId::Cam).in_effect);
+        assert_eq!(controller.plane(PlaneId::Cam).reason, None);
     }
 
     #[test]
-    fn target_is_not_in_effect_while_the_owner_applies_an_older_grant() {
+    fn armed_slate_without_a_stream_is_the_exposed_slate() {
+        let mut controller = after(&[
+            Observation::Cam(cam(Ready, Ready)).into(),
+            Command::Apply(Preset {
+                cam: Some(CamPermission::Slate(SlateId(3))),
+                mic: None,
+            })
+            .into(),
+        ]);
+
+        let _ = controller.handle_input(applying(&controller, CamOutput::Nothing));
+
+        assert_eq!(controller.cam().exposed_slate(), Some(SlateId(3)));
+    }
+
+    #[test]
+    fn slate_output_is_the_exposed_slate_over_an_armed_slate() {
+        let mut controller = after(&[
+            Observation::Cam(cam(Ready, Ready)).into(),
+            Command::Apply(Preset {
+                cam: Some(CamPermission::Slate(SlateId(3))),
+                mic: None,
+            })
+            .into(),
+        ]);
+
+        let _ = controller.handle_input(applying(&controller, CamOutput::Slate(Some(SlateId(5)))));
+
+        assert_eq!(controller.cam().exposed_slate(), Some(SlateId(5)));
+    }
+
+    #[test]
+    fn live_exposure_has_no_exposed_slate() {
         let mut controller = live_controller();
-        let report = CamReport {
-            applied: Some(Granted {
-                permission: CamPermission::Blank,
-                epoch: Epoch::BOOT,
-            }),
-            ..cam(Ready, Ready)
-        };
 
-        let _ = controller.handle_input(Observation::Cam(report).into());
+        let _ = controller.handle_input(applying(&controller, CamOutput::Slate(Some(SlateId(3)))));
 
-        assert!(!controller.plane(PlaneId::Cam).in_effect);
+        assert_eq!(controller.cam().exposed_slate(), None);
     }
 
     #[test]
