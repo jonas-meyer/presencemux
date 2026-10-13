@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    # Applies the new udev rule to the hidraw nodes that exist.
+    udevadm control --reload || true
+    udevadm trigger --subsystem-match=hidraw --action=change || true
+    udevadm settle || true
+fi
+
+#DEBHELPER#

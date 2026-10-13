@@ -1,0 +1,18 @@
+# Tags the hidraw node of the Stream Deck Neo for presencemux-deck. Gives the
+# group presencemux access to the node. presencemux-deck uses only the tagged
+# node.
+#
+# To use another deck, copy this file to /etc/udev/rules.d/ and change the
+# copy. The copy replaces this file. Then apply it to the connected devices:
+#   udevadm control --reload
+#   udevadm trigger --subsystem-match=hidraw --action=change
+# Check a node with `udevadm info /dev/hidrawN` (the CURRENT_TAGS line).
+
+ACTION=="remove", GOTO="presencemux_deck_end"
+SUBSYSTEM!="hidraw", GOTO="presencemux_deck_end"
+
+# The Elgato Stream Deck Neo.
+ATTRS{idVendor}=="0fd9", ATTRS{idProduct}=="009a", \
+  GROUP="presencemux", MODE="0660", TAG+="presencemux-deck"
+
+LABEL="presencemux_deck_end"

@@ -1,0 +1,52 @@
+[package]
+name = "presencemux-deck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Stream Deck owner of the PresenceMux appliance"
+
+[package.metadata.deb]
+maintainer = "Jonas Meyer-Ohle <19151471+jonas-meyer@users.noreply.github.com>"
+copyright = "2026, Jonas Meyer-Ohle"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+presencemux-deck owns the Stream Deck Neo of the PresenceMux appliance. It \
+draws the status of presencemuxd on the keys and the info bar, and it sends \
+the key presses to presencemuxd. If the process stops, the deck goes dark \
+within 5 s."""
+section = "video"
+depends = "$auto, systemd (>= 257), presencemuxd, fonts-dejavu-core"
+maintainer-scripts = "debian/"
+assets = [
+    ["target/release/presencemux-deck", "usr/bin/", "755"],
+    ["debian/70-presencemux-deck.rules", "usr/lib/udev/rules.d/", "644"],
+    ["debian/NOTICE", "usr/share/doc/presencemux-deck/", "644"],
+]
+systemd-units = { enable = true, start = true }
+
+[dependencies]
+ab_glyph.workspace = true
+jpeg-encoder.workspace = true
+presencemux-api.workspace = true
+rustix = { workspace = true, features = ["event", "fs", "time"] }
+sd-notify.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tiny-skia.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "sync", "time"] }
+tokio-stream.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-journald.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+udev.workspace = true
+zlink = { workspace = true, features = ["proxy"] }
+
+[dev-dependencies]
+insta.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

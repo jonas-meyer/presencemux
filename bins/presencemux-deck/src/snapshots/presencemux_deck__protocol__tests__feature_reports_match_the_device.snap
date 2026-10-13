@@ -1,0 +1,10 @@
+---
+source: bins/presencemux-deck/src/protocol.rs
+expression: table
+---
+reset           | 03 02 00 00 00 00 00 00
+brightness 60   | 03 08 3c 00 00 00 00 00
+brightness 150  | 03 08 64 00 00 00 00 00
+sleep 5 s       | 03 0d 05 00 00 00 00 00
+sleep off       | 03 0d 00 00 00 00 00 00
+fill left red   | 03 06 08 ff 00 00 00 00

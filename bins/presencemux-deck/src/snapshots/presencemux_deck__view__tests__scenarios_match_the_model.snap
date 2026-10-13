@@ -1,0 +1,168 @@
+---
+source: bins/presencemux-deck/src/view.rs
+expression: table
+---
+## privacy
+preset:privacy     Private          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Neutral          LIVE                                 press Release: [ApplyPreset("live")]
+toggle:mic         Plane(Off)       OFF                                  press Release: [SetMic(Unmuted)]
+toggle:cam         Plane(Off)       OFF                                  press Release: [SetCam(Live)]
+preset:still-here  Neutral          STILL-HERE                           press Release: [ApplyPreset("still-here")]
+preset:brb         Neutral          BRB                                  press Release: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Release: [ApplyPreset("away")]
+resume             Dark             RESUME                               press nothing
+touch [Off, Off] | bar CAM OFF / MIC OFF / privacy
+
+## live in a call
+preset:privacy     Neutral          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Plane(Live)      LIVE                                 press Press: [ApplyPreset("live")]
+toggle:mic         Plane(Live)      LIVE                                 press Press: [SetMic(Muted)]
+toggle:cam         Plane(Live)      ON AIR                               press Press: [SetCam(Off)]
+preset:still-here  Neutral          STILL-HERE                           press Press: [ApplyPreset("still-here")]
+preset:brb         Neutral          BRB                                  press Press: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Press: [ApplyPreset("away")]
+resume             Dark             RESUME                               press nothing
+touch [Live, Live] | bar CAM ON AIR / MIC LIVE / live
+
+## mic idle
+preset:privacy     Neutral          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Plane(Live)      LIVE                                 press Press: [ApplyPreset("live")]
+toggle:mic         Plane(Live)      LIVE        IDLE                     press Press: [SetMic(Muted)]
+toggle:cam         Plane(Live)      ON AIR                               press Press: [SetCam(Off)]
+preset:still-here  Neutral          STILL-HERE                           press Press: [ApplyPreset("still-here")]
+preset:brb         Neutral          BRB                                  press Press: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Press: [ApplyPreset("away")]
+resume             Dark             RESUME                               press nothing
+touch [Live, Live] | bar CAM ON AIR / MIC LIVE / mic idle
+
+## no stream
+preset:privacy     Neutral          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Plane(Live)      LIVE                                 press Press: [ApplyPreset("live")]
+toggle:mic         Plane(Live)      LIVE        IDLE                     press Press: [SetMic(Muted)]
+toggle:cam         Plane(Live)      ON AIR      IDLE                     press Press: [SetCam(Off)]
+preset:still-here  Neutral          STILL-HERE                           press Press: [ApplyPreset("still-here")]
+preset:brb         Neutral          BRB                                  press Press: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Press: [ApplyPreset("away")]
+resume             Dark             RESUME                               press nothing
+touch [Live, Live] | bar CAM ON AIR / MIC LIVE / no stream, blank in 18s
+
+## stream timeout
+preset:privacy     Neutral          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Neutral          LIVE        HELD: stream stopped     press nothing
+toggle:mic         Plane(Live)      LIVE        IDLE                     press Press: [SetMic(Muted)]
+toggle:cam         Plane(Off)       OFF         HELD: stream stopped     press nothing
+preset:still-here  Neutral          STILL-HERE                           press Release: [ApplyPreset("still-here")]
+preset:brb         Neutral          BRB                                  press Release: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Release: [ApplyPreset("away")]
+resume             Dark             RESUME      cam live                 press nothing
+touch [Off, Live] | bar CAM OFF / MIC LIVE / held: stream stopped
+
+## camera fault
+preset:privacy     Neutral          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Neutral          LIVE        HELD: camera fault       press nothing
+toggle:mic         Plane(Off)       OFF                                  press Release: [SetMic(Unmuted)]
+toggle:cam         Plane(Off)       OFF         HELD: camera fault       press nothing
+preset:still-here  Neutral          STILL-HERE                           press Release: [ApplyPreset("still-here")]
+preset:brb         Neutral          BRB                                  press Release: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Release: [ApplyPreset("away")]
+resume             Dark             RESUME      cam live                 press nothing
+touch [Off, Off] | bar CAM OFF / MIC OFF / fault: camera fault 3m
+
+## camera back
+preset:privacy     Neutral          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Neutral          LIVE        HELD: camera fault       press nothing
+toggle:mic         Plane(Off)       OFF                                  press Release: [SetMic(Unmuted)]
+toggle:cam         Plane(Off)       OFF         HELD: camera fault       press nothing
+preset:still-here  Neutral          STILL-HERE                           press Release: [ApplyPreset("still-here")]
+preset:brb         Neutral          BRB                                  press Release: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Release: [ApplyPreset("away")]
+resume             Neutral          RESUME      cam live                 press Release: [Resume(Cam)]
+touch [Off, Off] | bar CAM OFF / MIC OFF / held: camera fault
+
+## updating
+preset:privacy     Neutral          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Neutral          LIVE        UPDATING                 press Release: [ApplyPreset("live")]
+toggle:mic         Plane(Live)      LIVE                                 press Press: [SetMic(Muted)]
+toggle:cam         Plane(Off)       OFF         UPDATING                 press Release: [SetCam(Live)]
+preset:still-here  Neutral          STILL-HERE                           press Release: [ApplyPreset("still-here")]
+preset:brb         Neutral          BRB                                  press Release: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Release: [ApplyPreset("away")]
+resume             Dark             RESUME                               press nothing
+touch [Off, Live] | bar CAM OFF / MIC LIVE / ready
+
+## latched
+preset:privacy     Neutral          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Neutral          LIVE                                 press Release: [ApplyPreset("live")]
+toggle:mic         Plane(Off)       OFF                                  press Release: [SetMic(Unmuted)]
+toggle:cam         Plane(Off)       OFF         BLOCKED                  press Release: [SetCam(Live)]
+preset:still-here  Neutral          STILL-HERE                           press Release: [ApplyPreset("still-here")]
+preset:brb         Neutral          BRB                                  press Release: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Release: [ApplyPreset("away")]
+resume             Dark             RESUME                               press nothing
+touch [Off, Off] | bar CAM OFF / MIC OFF / ready
+
+## waiting
+preset:privacy     Neutral          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Neutral          LIVE                                 press Release: [ApplyPreset("live")]
+toggle:mic         Plane(Off)       OFF                                  press Release: [SetMic(Unmuted)]
+toggle:cam         Plane(Off)       OFF         WAITING                  press Release: [SetCam(Live)]
+preset:still-here  Neutral          STILL-HERE                           press Release: [ApplyPreset("still-here")]
+preset:brb         Neutral          BRB                                  press Release: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Release: [ApplyPreset("away")]
+resume             Dark             RESUME                               press nothing
+touch [Off, Off] | bar CAM OFF / MIC OFF / degraded: camera missing 3m
+
+## brb
+preset:privacy     Neutral          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Neutral          LIVE                                 press Release: [ApplyPreset("live")]
+toggle:mic         Plane(Off)       OFF                                  press Release: [SetMic(Unmuted)]
+toggle:cam         Plane(Canned)    BRB                                  press Press: [SetCam(Off)]
+preset:still-here  Neutral          STILL-HERE                           press Release: [ApplyPreset("still-here")]
+preset:brb         Plane(Canned)    BRB                                  press Press: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Press: [ApplyPreset("away")]
+resume             Dark             RESUME                               press nothing
+touch [Canned, Off] | bar CAM BRB / MIC OFF / brb
+
+## brb without a stream
+preset:privacy     Neutral          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Neutral          LIVE                                 press Release: [ApplyPreset("live")]
+toggle:mic         Plane(Off)       OFF                                  press Release: [SetMic(Unmuted)]
+toggle:cam         Plane(Canned)    BRB         IDLE                     press Press: [SetCam(Off)]
+preset:still-here  Neutral          STILL-HERE                           press Release: [ApplyPreset("still-here")]
+preset:brb         Plane(Canned)    BRB                                  press Press: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Press: [ApplyPreset("away")]
+resume             Dark             RESUME                               press nothing
+touch [Canned, Off] | bar CAM BRB / MIC OFF / no stream, blank in 5s
+
+## mixed
+preset:privacy     Neutral          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Neutral          LIVE                                 press Release: [ApplyPreset("live")]
+toggle:mic         Plane(Off)       OFF                                  press Release: [SetMic(Unmuted)]
+toggle:cam         Plane(Live)      ON AIR                               press Press: [SetCam(Off)]
+preset:still-here  Neutral          STILL-HERE                           press Release: [ApplyPreset("still-here")]
+preset:brb         Neutral          BRB                                  press Press: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Press: [ApplyPreset("away")]
+resume             Dark             RESUME                               press nothing
+touch [Live, Off] | bar CAM ON AIR / MIC OFF / ready
+
+## lost owner
+preset:privacy     Neutral          PRIVACY                              press Press: [ApplyPreset("privacy")]
+preset:live        Neutral          LIVE        HELD: cam worker lost    press nothing
+toggle:mic         Plane(Off)       OFF                                  press Release: [SetMic(Unmuted)]
+toggle:cam         Plane(Unknown)   ?           HELD: cam worker lost    press Press: [SetCam(Off)]
+preset:still-here  Neutral          STILL-HERE                           press Release: [ApplyPreset("still-here")]
+preset:brb         Neutral          BRB                                  press Release: [ApplyPreset("brb")]
+preset:away        Neutral          AWAY                                 press Release: [ApplyPreset("away")]
+resume             Dark             RESUME      cam live                 press nothing
+touch [Unknown, Off] | bar CAM ? / MIC OFF / fault: cam worker lost 5s
+
+## offline
+preset:privacy     Plane(Unknown)   OFFLINE                              press nothing
+preset:live        Plane(Unknown)   OFFLINE                              press nothing
+toggle:mic         Plane(Unknown)   OFFLINE                              press nothing
+toggle:cam         Plane(Unknown)   OFFLINE                              press nothing
+preset:still-here  Plane(Unknown)   OFFLINE                              press nothing
+preset:brb         Plane(Unknown)   OFFLINE                              press nothing
+preset:away        Plane(Unknown)   OFFLINE                              press nothing
+resume             Plane(Unknown)   OFFLINE                              press nothing
+touch [Unknown, Unknown] | bar CAM ? / MIC ? / no controller

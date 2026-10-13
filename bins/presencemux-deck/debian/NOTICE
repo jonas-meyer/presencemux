@@ -1,0 +1,5 @@
+presencemux-deck encodes its images with the jpeg-encoder crate. This software
+is based in part on the work of the Independent JPEG Group.
+
+The images use the DejaVu fonts from the package fonts-dejavu-core. That
+package holds their license.
