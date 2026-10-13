@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{self, Instant, MissedTickBehavior};
 
 use crate::config::{Config, PresetRef};
-use crate::status::status;
+use crate::status::{Conditions, status};
 use crate::systemd;
 
 const CAPACITY: usize = 64;
@@ -118,6 +118,8 @@ pub(crate) struct EventLoop {
     cam: watch::Sender<Leased<CamPermission>>,
     mic: watch::Sender<Leased<MicPermission>>,
     status: watch::Sender<Status>,
+    /// The conditions of the owners and their devices.
+    conditions: Conditions,
     /// The time of the last report of each owner that has reported.
     reports: Vec<LastReport>,
     /// The time without a stream of the cam worker, if the host receives none.
@@ -147,8 +149,8 @@ struct LastReport {
 pub(crate) enum Message {
     Request(Request, oneshot::Sender<()>),
     /// The observation of one report of an owner, or `Lost` after a failed
-    /// exchange.
-    Report(Owner, Observation),
+    /// exchange, and the message of the owner.
+    Report(Owner, Observation, Option<String>),
     /// An observation that no owner reports, for example the host status.
     Observation(Observation),
 }
@@ -175,15 +177,16 @@ impl Handle {
         handled.await.map_err(|_| HandleError::Stopped)
     }
 
-    /// Sends the observation of a report of `owner`. It waits while the
-    /// channel is full.
+    /// Sends the observation of a report of `owner`, and the message of the
+    /// owner. It waits while the channel is full.
     pub(crate) async fn report(
         &self,
         owner: Owner,
         observation: Observation,
+        message: Option<String>,
     ) -> Result<(), HandleError> {
         self.0
-            .send(Message::Report(owner, observation))
+            .send(Message::Report(owner, observation, message))
             .await
             .map_err(|_| HandleError::Stopped)
     }
@@ -215,7 +218,9 @@ impl EventLoop {
         let (sender, messages) = mpsc::channel(CAPACITY);
         let (cam, cam_receiver) = watch::channel(clock.lease(controller.cam().target()));
         let (mic, mic_receiver) = watch::channel(clock.lease(controller.mic().target()));
-        let (status, status_receiver) = watch::channel(status(&controller, &config.slates, None));
+        let conditions = Conditions::new(clock.now());
+        let (status, status_receiver) =
+            watch::channel(status(&controller, &config.slates, None, &conditions));
         let event_loop = Self {
             controller,
             config,
@@ -226,6 +231,7 @@ impl EventLoop {
             cam,
             mic,
             status,
+            conditions,
             reports: Vec::new(),
             stream_idle: None,
         };
@@ -291,9 +297,13 @@ impl EventLoop {
                 self.publish();
                 let _ = done.send(());
             }
-            Message::Report(owner, observation) => {
+            Message::Report(owner, observation, message) => {
                 self.record_report(owner);
-                self.observe([observation]);
+                let message_changed = self.conditions.set_message(owner, message);
+                let changed = self.apply(observation.into());
+                if changed || message_changed {
+                    self.publish();
+                }
             }
             Message::Observation(observation) => self.observe([observation]),
         }
@@ -426,8 +436,14 @@ impl EventLoop {
     }
 
     /// Sends the status if a field of it changed.
-    fn publish(&self) {
-        let next = status(&self.controller, &self.config.slates, self.preset.as_ref());
+    fn publish(&mut self) {
+        self.conditions.update(&self.controller, self.clock.now());
+        let next = status(
+            &self.controller,
+            &self.config.slates,
+            self.preset.as_ref(),
+            &self.conditions,
+        );
         self.status.send_if_modified(|current| {
             let modified = *current != next;
             if modified {
@@ -447,11 +463,16 @@ impl Clock {
         }
     }
 
+    /// Returns the time now.
+    fn now(&self) -> Monotonic {
+        Monotonic(self.start.0 + self.started.elapsed())
+    }
+
     fn lease<T>(&self, granted: Granted<T>) -> Leased<T> {
         Leased {
             session: self.start,
             granted,
-            until: Monotonic(self.start.0 + self.started.elapsed() + LEASE),
+            until: Monotonic(self.now().0 + LEASE),
         }
     }
 }
@@ -459,7 +480,7 @@ impl Clock {
 #[cfg(test)]
 mod tests {
     use presencemux_api::{Cause, Health, Mute};
-    use presencemux_core::{CamReport, DeviceStatus, MicMute, MicReport};
+    use presencemux_core::{CamOutput, CamReport, DeviceStatus, MicMute, MicOutput, MicReport};
 
     use super::*;
 
@@ -475,12 +496,18 @@ mod tests {
         camera: DeviceStatus::Ready,
         stream: CamStream::Idle,
         latched: None,
+        output: CamOutput::Blank,
+        exceeded: false,
+        applied: None,
     };
 
     const MIC_READY: MicReport = MicReport {
         gate: DeviceStatus::Ready,
         interface: DeviceStatus::Ready,
         latched: None,
+        output: MicOutput::Silent,
+        exceeded: false,
+        applied: None,
     };
 
     /// Sends a report with ready devices for each plane in `planes`.
@@ -545,7 +572,7 @@ mod tests {
 
         handle.request(mic(MicMute::Unmuted)).await.unwrap();
 
-        assert_eq!(outputs.status.borrow().mic.desired, Mute::Unmuted);
+        assert_eq!(outputs.status.borrow().mic.requested, Mute::Unmuted);
     }
 
     #[tokio::test(start_paused = true)]
@@ -606,8 +633,8 @@ mod tests {
             MicPermission::Denied
         );
         let status = outputs.status.borrow();
-        assert_eq!(status.cam.cause, Some(Cause::ControllerStalled));
-        assert_eq!(status.mic.cause, Some(Cause::ControllerStalled));
+        assert_eq!(status.cam.hold, Some(Cause::ControllerStalled));
+        assert_eq!(status.mic.hold, Some(Cause::ControllerStalled));
     }
 
     #[tokio::test(start_paused = true)]
@@ -637,7 +664,7 @@ mod tests {
             .unwrap();
 
         let status = outputs.status.borrow();
-        assert_eq!(status.mic.cause, Some(Cause::GateFault));
+        assert_eq!(status.mic.hold, Some(Cause::GateFault));
         assert_eq!(status.preset.as_deref(), Some("talk"));
     }
 
@@ -660,7 +687,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn report_that_changes_no_status_field_sends_no_status() {
-        let (_, handle, outputs) = start("");
+        let (_, handle, mut outputs) = start("");
+        ready(&handle, &[PlaneId::Cam]).await;
+        settle().await;
+        outputs.status.mark_unchanged();
 
         ready(&handle, &[PlaneId::Cam]).await;
         settle().await;
@@ -696,7 +726,7 @@ mod tests {
     async fn owner_without_a_report_for_2_s_sets_the_health_to_fault() {
         let (_, handle, outputs) = start("");
         handle
-            .report(Owner::CamWorker, Observation::Cam(CAM_READY))
+            .report(Owner::CamWorker, Observation::Cam(CAM_READY), None)
             .await
             .unwrap();
 
@@ -709,16 +739,13 @@ mod tests {
     async fn cam_worker_without_a_report_for_2_s_lowers_the_cam_as_lost() {
         let (handle, outputs) = start_with_live_cam("").await;
         handle
-            .report(Owner::CamWorker, Observation::Cam(CAM_READY))
+            .report(Owner::CamWorker, Observation::Cam(CAM_READY), None)
             .await
             .unwrap();
 
         time::sleep(Duration::from_millis(2_300)).await;
 
-        assert_eq!(
-            outputs.status.borrow().cam.cause,
-            Some(Cause::CamWorkerLost)
-        );
+        assert_eq!(outputs.status.borrow().cam.hold, Some(Cause::CamWorkerLost));
     }
 
     #[tokio::test(start_paused = true)]
@@ -726,14 +753,14 @@ mod tests {
         let (_, handle, outputs) = start("");
         handle.request(mic(MicMute::Unmuted)).await.unwrap();
         handle
-            .report(Owner::AudioWorker, Observation::Mic(MIC_READY))
+            .report(Owner::AudioWorker, Observation::Mic(MIC_READY), None)
             .await
             .unwrap();
 
         time::sleep(Duration::from_millis(2_300)).await;
 
         assert_eq!(
-            outputs.status.borrow().mic.cause,
+            outputs.status.borrow().mic.hold,
             Some(Cause::AudioWorkerLost)
         );
     }
@@ -742,14 +769,14 @@ mod tests {
     async fn owner_with_a_report_every_1800_ms_keeps_the_cam_live() {
         let (_, handle, outputs) = start("");
         handle
-            .report(Owner::CamWorker, Observation::Cam(CAM_READY))
+            .report(Owner::CamWorker, Observation::Cam(CAM_READY), None)
             .await
             .unwrap();
         handle.request(cam(CamPermission::Live)).await.unwrap();
 
         time::sleep(Duration::from_millis(1_800)).await;
         handle
-            .report(Owner::CamWorker, Observation::Cam(CAM_READY))
+            .report(Owner::CamWorker, Observation::Cam(CAM_READY), None)
             .await
             .unwrap();
         time::sleep(Duration::from_millis(1_800)).await;
@@ -770,7 +797,7 @@ mod tests {
     async fn late_tick_does_not_set_an_owner_to_lost() {
         let (_, handle, outputs) = start("");
         handle
-            .report(Owner::CamWorker, Observation::Cam(CAM_READY))
+            .report(Owner::CamWorker, Observation::Cam(CAM_READY), None)
             .await
             .unwrap();
         settle().await;
@@ -808,10 +835,7 @@ mod tests {
 
         time::sleep(Duration::from_secs(30) + 2 * TICK).await;
 
-        assert_eq!(
-            outputs.status.borrow().cam.cause,
-            Some(Cause::StreamStopped)
-        );
+        assert_eq!(outputs.status.borrow().cam.hold, Some(Cause::StreamStopped));
     }
 
     #[tokio::test(start_paused = true)]
@@ -824,10 +848,7 @@ mod tests {
 
         time::sleep(Duration::from_secs(30) + 2 * TICK).await;
 
-        assert_eq!(
-            outputs.status.borrow().cam.cause,
-            Some(Cause::StreamStopped)
-        );
+        assert_eq!(outputs.status.borrow().cam.hold, Some(Cause::StreamStopped));
     }
 
     #[tokio::test(start_paused = true)]
@@ -838,10 +859,7 @@ mod tests {
         handle.request(mic(MicMute::Unmuted)).await.unwrap();
         time::sleep(Duration::from_secs(10) + 2 * TICK).await;
 
-        assert_eq!(
-            outputs.status.borrow().cam.cause,
-            Some(Cause::StreamStopped)
-        );
+        assert_eq!(outputs.status.borrow().cam.hold, Some(Cause::StreamStopped));
     }
 
     #[tokio::test(start_paused = true)]

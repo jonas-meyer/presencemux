@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::convert::Infallible;
 use std::future::pending;
 use std::io;
+use std::mem::{Discriminant, discriminant};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,10 +30,64 @@ type Stream = zlink::tokio::unix::Stream;
 
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
+/// The number of generations of the gate word that [`Generations`] keeps.
+const KEPT_GENERATIONS: usize = 4;
+
+/// The grants of the last generations of the gate word. A generation starts
+/// when the class of the gate state or the grant of its lease changes.
+#[derive(Debug)]
+struct Generations {
+    /// The current generation.
+    current: u16,
+    /// The class of the gate state and the grant of the current generation.
+    key: (Discriminant<gate::State>, Option<api::Grant>),
+    /// The generation and its grant, at the index of the generation modulo
+    /// [`KEPT_GENERATIONS`].
+    kept: [Option<(u16, Option<api::Grant>)>; KEPT_GENERATIONS],
+}
+
+impl Default for Generations {
+    /// Returns generation 0 of a blocked gate without a grant.
+    fn default() -> Self {
+        let mut kept = [None; KEPT_GENERATIONS];
+        kept[0] = Some((0, None));
+        Self {
+            current: 0,
+            key: (discriminant(&gate::State::Blocked), None),
+            kept,
+        }
+    }
+}
+
+impl Generations {
+    /// Returns the generation of `state` with `grant`. Starts a new
+    /// generation if the class of `state` or `grant` changes. A new open
+    /// time with the same grant keeps the generation.
+    fn advance(&mut self, state: gate::State, grant: Option<api::Grant>) -> u16 {
+        let key = (discriminant(&state), grant);
+        if key != self.key {
+            self.key = key;
+            self.current = self.current.wrapping_add(1);
+            self.kept[usize::from(self.current) % KEPT_GENERATIONS] = Some((self.current, grant));
+        }
+        self.current
+    }
+
+    /// Returns the grant of `generation`, or `None` if the generation has no
+    /// grant or is not one of the kept generations.
+    fn grant(&self, generation: u16) -> Option<api::Grant> {
+        match self.kept[usize::from(generation) % KEPT_GENERATIONS] {
+            Some((kept, grant)) if kept == generation => grant,
+            _ => None,
+        }
+    }
+}
+
 /// The lease and the latch of the gate, and the state of the PipeWire thread.
 #[derive(Debug)]
 pub(crate) struct Control {
     gate: Gate,
+    generations: Generations,
     rt: Arc<RtState>,
 }
 
@@ -40,6 +95,7 @@ impl Control {
     pub(crate) fn new(rt: Arc<RtState>) -> Self {
         Self {
             gate: Gate::default(),
+            generations: Generations::default(),
             rt,
         }
     }
@@ -53,14 +109,27 @@ impl Control {
         self.publish(now);
     }
 
-    /// Passes the state of the gate at `now` to the real-time thread.
-    fn publish(&self, now: Duration) {
-        self.rt.set_gate(self.gate.state(now));
+    /// Passes the state of the gate at `now` and its generation to the
+    /// real-time thread.
+    fn publish(&mut self, now: Duration) {
+        let state = self.gate.state(now);
+        let generation = self.generations.advance(state, self.applied(now));
+        self.rt.set_gate(state, generation);
+    }
+
+    /// Returns the grant of the valid lease at `now`.
+    fn applied(&self, now: Duration) -> Option<api::Grant> {
+        self.gate.lease(now).map(|lease| api::Grant {
+            session_usec: micros(lease.grant.session),
+            epoch: i64::from(lease.grant.epoch),
+            permission: permission_to_wire(lease.permission),
+        })
     }
 
     /// Returns the report at the time `now`. `rejected` is the rejection of the
     /// lease in this call.
     fn report(&self, now: Duration, rejected: Option<gate::Rejection>) -> Report {
+        let cycle = self.rt.last_cycle(now);
         Report {
             gate: self.rt.streams(),
             interface: self.rt.interface(),
@@ -70,7 +139,9 @@ impl Control {
                 reason: latch.reason.into(),
             }),
             rejected: rejected.map(rejection_to_wire),
-            open: matches!(self.gate.state(now), gate::State::Open { .. }),
+            output: cycle.map_or(api::Output::Silent, |cycle| cycle.output),
+            output_grant: cycle.and_then(|cycle| self.generations.grant(cycle.generation)),
+            applied: self.applied(now),
         }
     }
 }
@@ -120,11 +191,16 @@ fn lease_to_wire(lease: &gate::Lease) -> Lease {
     Lease {
         session_usec: micros(lease.grant.session),
         epoch: i64::from(lease.grant.epoch),
-        permission: match lease.permission {
-            gate::Permission::Denied => Permission::Denied,
-            gate::Permission::Permitted => Permission::Permitted,
-        },
+        permission: permission_to_wire(lease.permission),
         until_usec: micros(lease.until),
+    }
+}
+
+/// Returns `permission` in the wire types.
+fn permission_to_wire(permission: gate::Permission) -> Permission {
+    match permission {
+        gate::Permission::Denied => Permission::Denied,
+        gate::Permission::Permitted => Permission::Permitted,
     }
 }
 
@@ -263,7 +339,17 @@ impl Service {
     product = "presencemux-audio",
     version = env!("CARGO_PKG_VERSION"),
     url = "https://github.com/jonas-meyer/presencemux",
-    types = [Lease, Permission, Report, api::DeviceStatus, api::Latch, LatchReason, Rejection]
+    types = [
+        Lease,
+        Permission,
+        Report,
+        api::DeviceStatus,
+        api::Latch,
+        LatchReason,
+        Rejection,
+        api::Output,
+        api::Grant
+    ]
 )]
 impl Service {
     /// Accepts or rejects a lease, and returns the report.
@@ -346,6 +432,22 @@ mod tests {
         }
     }
 
+    /// Returns the grant of `epoch` in the session of the tests.
+    fn grant(epoch: i64, permission: Permission) -> api::Grant {
+        api::Grant {
+            session_usec: SESSION_USEC,
+            epoch,
+            permission,
+        }
+    }
+
+    /// Returns the open state until `seconds` after boot.
+    fn open_until(seconds: u64) -> gate::State {
+        gate::State::Open {
+            until: Duration::from_secs(seconds),
+        }
+    }
+
     /// Returns a lease of `epoch` that expires one second from now.
     fn lease(epoch: i64, permission: Permission) -> Lease {
         Lease {
@@ -377,20 +479,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "local")]
-    async fn first_permitted_lease_does_not_open_the_gate() {
-        let (mut client, _control) = connect();
+    async fn first_permitted_lease_blocks_the_gate_on_the_real_time_thread() {
+        let (mut client, control) = connect();
 
-        let renewed = client
+        client
             .renew(&lease(3, Permission::Permitted))
             .await
             .unwrap()
             .unwrap();
 
-        assert!(!renewed.report.open);
+        assert_eq!(control.borrow().rt.gate_state(), pipewire::BLOCKED);
     }
 
     #[tokio::test(flavor = "local")]
-    async fn permitted_lease_with_a_newer_epoch_opens_the_gate() {
+    async fn report_of_a_valid_lease_applies_its_grant() {
         let (mut client, _control) = connect();
         client
             .renew(&lease(0, Permission::Denied))
@@ -404,7 +506,261 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(renewed.report.open);
+        assert_eq!(
+            renewed.report.applied,
+            Some(api::Grant {
+                session_usec: SESSION_USEC,
+                epoch: 1,
+                permission: Permission::Permitted,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn gate_latched_by_its_first_lease_applies_the_grant_of_the_lease() {
+        let (mut client, _control) = connect();
+
+        let renewed = client
+            .renew(&lease(3, Permission::Permitted))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            renewed.report.applied,
+            Some(api::Grant {
+                session_usec: SESSION_USEC,
+                epoch: 3,
+                permission: Permission::Permitted,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn report_without_a_lease_applies_no_grant() {
+        let (mut client, _control) = connect();
+
+        let description = client.describe().await.unwrap().unwrap();
+
+        assert_eq!(description.report.applied, None);
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn report_without_a_gate_cycle_is_silent() {
+        let (mut client, _control) = connect();
+
+        let renewed = client
+            .renew(&lease(0, Permission::Permitted))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(renewed.report.output, api::Output::Silent);
+    }
+
+    #[test]
+    fn new_generations_are_at_generation_0() {
+        let generations = Generations::default();
+
+        assert_eq!(generations.current, 0);
+    }
+
+    #[test]
+    fn renewal_that_only_moves_the_open_time_keeps_the_generation() {
+        let mut generations = Generations::default();
+        generations.advance(open_until(7), Some(grant(1, Permission::Permitted)));
+
+        let generation = generations.advance(open_until(8), Some(grant(1, Permission::Permitted)));
+
+        assert_eq!(generation, 1);
+    }
+
+    #[test]
+    fn new_grant_starts_a_new_generation() {
+        let mut generations = Generations::default();
+        generations.advance(open_until(7), Some(grant(1, Permission::Permitted)));
+
+        let generation = generations.advance(open_until(7), Some(grant(2, Permission::Permitted)));
+
+        assert_eq!(generation, 2);
+    }
+
+    #[test]
+    fn new_class_with_the_same_grant_starts_a_new_generation() {
+        let mut generations = Generations::default();
+        generations.advance(open_until(7), Some(grant(1, Permission::Permitted)));
+
+        let generation =
+            generations.advance(gate::State::Blocked, Some(grant(1, Permission::Permitted)));
+
+        assert_eq!(generation, 2);
+    }
+
+    #[test]
+    fn kept_generation_gives_its_grant() {
+        let mut generations = Generations::default();
+        generations.advance(open_until(7), Some(grant(1, Permission::Permitted)));
+        generations.advance(gate::State::Denied, Some(grant(2, Permission::Denied)));
+
+        assert_eq!(generations.grant(1), Some(grant(1, Permission::Permitted)));
+    }
+
+    #[test]
+    fn generation_4_changes_old_gives_no_grant() {
+        let mut generations = Generations::default();
+        generations.advance(gate::State::Denied, Some(grant(1, Permission::Denied)));
+        generations.advance(gate::State::Denied, Some(grant(2, Permission::Denied)));
+        generations.advance(gate::State::Denied, Some(grant(3, Permission::Denied)));
+        generations.advance(gate::State::Denied, Some(grant(4, Permission::Denied)));
+        generations.advance(gate::State::Denied, Some(grant(5, Permission::Denied)));
+
+        assert_eq!(generations.grant(1), None);
+    }
+
+    #[test]
+    fn generation_after_the_current_one_gives_no_grant() {
+        let mut generations = Generations::default();
+        generations.advance(gate::State::Denied, Some(grant(1, Permission::Denied)));
+
+        assert_eq!(generations.grant(5), None);
+    }
+
+    #[test]
+    fn generation_wraps_after_65535() {
+        let mut generations = Generations {
+            current: u16::MAX,
+            ..Generations::default()
+        };
+
+        let generation =
+            generations.advance(gate::State::Denied, Some(grant(1, Permission::Denied)));
+
+        assert_eq!(generation, 0);
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn renewal_that_only_moves_the_expiry_keeps_the_generation_on_the_real_time_thread() {
+        let (mut client, control) = connect();
+        client
+            .renew(&lease(0, Permission::Denied))
+            .await
+            .unwrap()
+            .unwrap();
+        client
+            .renew(&lease(1, Permission::Permitted))
+            .await
+            .unwrap()
+            .unwrap();
+        let first = control.borrow().rt.gate_generation();
+
+        client
+            .renew(&lease(1, Permission::Permitted))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(control.borrow().rt.gate_generation(), first);
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn report_after_a_denied_lease_gives_the_permitted_grant_of_the_passing_cycle() {
+        let (mut client, control) = connect();
+        client
+            .renew(&lease(0, Permission::Denied))
+            .await
+            .unwrap()
+            .unwrap();
+        client
+            .renew(&lease(1, Permission::Permitted))
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let rt = &control.borrow().rt;
+            rt.publish_cycle(clock::now_nanos(), rt.gate_word(), api::Output::Passing);
+        }
+
+        let renewed = client
+            .renew(&lease(2, Permission::Denied))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            (
+                renewed.report.output,
+                renewed.report.output_grant,
+                renewed.report.applied
+            ),
+            (
+                api::Output::Passing,
+                Some(grant(1, Permission::Permitted)),
+                Some(grant(2, Permission::Denied))
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn cycle_of_an_unknown_generation_gives_no_output_grant() {
+        let (mut client, control) = connect();
+        client
+            .renew(&lease(0, Permission::Denied))
+            .await
+            .unwrap()
+            .unwrap();
+        control.borrow().rt.publish_cycle(
+            clock::now_nanos(),
+            pipewire::gate_word(gate::State::Denied, 5),
+            api::Output::Closing,
+        );
+
+        let description = client.describe().await.unwrap().unwrap();
+
+        assert_eq!(description.report.output_grant, None);
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn report_of_a_passing_cycle_100_ms_old_is_silent() {
+        let (mut client, control) = connect();
+        client
+            .renew(&lease(0, Permission::Denied))
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let rt = &control.borrow().rt;
+            rt.publish_cycle(
+                clock::now_nanos() - 100_000_000,
+                rt.gate_word(),
+                api::Output::Passing,
+            );
+        }
+
+        let description = client.describe().await.unwrap().unwrap();
+
+        assert_eq!(description.report.output, api::Output::Silent);
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn report_of_a_passing_cycle_100_ms_old_gives_no_output_grant() {
+        let (mut client, control) = connect();
+        client
+            .renew(&lease(0, Permission::Denied))
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let rt = &control.borrow().rt;
+            rt.publish_cycle(
+                clock::now_nanos() - 100_000_000,
+                rt.gate_word(),
+                api::Output::Passing,
+            );
+        }
+
+        let description = client.describe().await.unwrap().unwrap();
+
+        assert_eq!(description.report.output_grant, None);
     }
 
     #[tokio::test(flavor = "local")]
@@ -416,11 +772,11 @@ mod tests {
             .unwrap()
             .unwrap();
         let permitted = lease(1, Permission::Permitted);
-        let until_nanos = u64::try_from(permitted.until_usec).unwrap() * 1_000;
+        let until_micros = u64::try_from(permitted.until_usec).unwrap();
 
         client.renew(&permitted).await.unwrap().unwrap();
 
-        assert_eq!(control.borrow().rt.gate_word(), until_nanos);
+        assert_eq!(control.borrow().rt.gate_state(), until_micros);
     }
 
     #[tokio::test(flavor = "local")]
@@ -487,7 +843,7 @@ mod tests {
 
         control.borrow_mut().check(expiry);
 
-        assert_eq!(control.borrow().rt.gate_word(), pipewire::BLOCKED);
+        assert_eq!(control.borrow().rt.gate_state(), pipewire::BLOCKED);
     }
 
     #[tokio::test(flavor = "local")]
@@ -510,7 +866,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(control.borrow().rt.gate_word(), pipewire::DENIED);
+        assert_eq!(control.borrow().rt.gate_state(), pipewire::DENIED);
     }
 
     #[tokio::test(flavor = "local")]

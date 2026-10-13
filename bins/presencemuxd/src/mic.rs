@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use presencemux_api::audio::{self as api, AudioProxy};
-use presencemux_core::{Epoch, MicPermission, MicReport};
+use presencemux_core::{Epoch, Granted, MicOutput, MicPermission, MicReport};
 use zlink::Connection;
 
 use crate::adapter::{Adapter, AdapterError, FIRST_WAIT, Latch, LatchReason, MAX_WAIT, Reply};
@@ -44,8 +44,8 @@ impl Mic {
     }
 
     /// Returns the reply of the audio worker in the types of the daemon. Keeps
-    /// only a latch in the session of the last lease, the session of this
-    /// daemon. Returns an error for a latch with an epoch out of range.
+    /// only a latch and a grant in the session of the last lease, the session
+    /// of this daemon. Returns an error for an epoch out of range.
     fn reply(&self, report: &api::Report) -> Result<Reply<MicReport>, AdapterError> {
         let latch = report
             .latched
@@ -59,13 +59,38 @@ impl Mic {
                 })
             })
             .transpose()?;
+        let applied = report
+            .applied
+            .filter(|grant| grant.session_usec == self.session)
+            .map(|grant| {
+                let epoch = u32::try_from(grant.epoch)
+                    .map_err(|_| AdapterError::Invalid("applied epoch"))?;
+                Ok(Granted {
+                    permission: match grant.permission {
+                        api::Permission::Denied => MicPermission::Denied,
+                        api::Permission::Permitted => MicPermission::Permitted,
+                    },
+                    epoch: Epoch::new(epoch),
+                })
+            })
+            .transpose()?;
         Ok(Reply {
             report: MicReport {
                 gate: report.gate.into(),
                 interface: report.interface.into(),
                 latched: latch.map(|latch| latch.epoch),
+                output: match report.output {
+                    api::Output::Silent => MicOutput::Silent,
+                    api::Output::Closing => MicOutput::Closing,
+                    api::Output::Passing => MicOutput::Passing,
+                },
+                exceeded: exceeded(report),
+                applied,
             },
             latch,
+            message: report
+                .rejected
+                .map(|rejection| format!("rejected the lease: {rejection}")),
         })
     }
 
@@ -113,6 +138,15 @@ impl Adapter for Mic {
     fn reset(&mut self) {
         self.connection = None;
     }
+}
+
+/// Returns whether the gate passes audio under a grant that does not permit
+/// it. A closing ramp never exceeds its grant.
+fn exceeded(report: &api::Report) -> bool {
+    report.output == api::Output::Passing
+        && report
+            .output_grant
+            .is_none_or(|grant| grant.permission != api::Permission::Permitted)
 }
 
 /// Returns `leased` in the wire types.
@@ -202,7 +236,9 @@ mod tests {
             api::DeviceStatus,
             api::Latch,
             api::LatchReason,
-            api::Rejection
+            api::Rejection,
+            api::Output,
+            api::Grant
         ]
     )]
     impl FakeService {
@@ -236,7 +272,9 @@ mod tests {
             interface: api::DeviceStatus::Ready,
             latched: None,
             rejected: None,
-            open: false,
+            output: api::Output::Silent,
+            output_grant: None,
+            applied: None,
         }
     }
 
@@ -300,6 +338,60 @@ mod tests {
                 until_usec: 41_500_000,
             }
         );
+    }
+
+    /// Returns a grant of epoch 2 in this session with `permission`.
+    fn grant(permission: api::Permission) -> api::Grant {
+        api::Grant {
+            session_usec: SESSION_USEC,
+            epoch: 2,
+            permission,
+        }
+    }
+
+    #[test]
+    fn closing_output_under_a_denied_grant_does_not_exceed_it() {
+        let report = api::Report {
+            output: api::Output::Closing,
+            output_grant: Some(grant(api::Permission::Denied)),
+            ..report()
+        };
+
+        assert!(!exceeded(&report));
+    }
+
+    #[test]
+    fn passing_output_under_a_denied_grant_exceeds_it() {
+        let report = api::Report {
+            output: api::Output::Passing,
+            output_grant: Some(grant(api::Permission::Denied)),
+            ..report()
+        };
+
+        assert!(exceeded(&report));
+    }
+
+    #[test]
+    fn passing_output_without_a_grant_exceeds_it() {
+        let report = api::Report {
+            output: api::Output::Passing,
+            output_grant: None,
+            ..report()
+        };
+
+        assert!(exceeded(&report));
+    }
+
+    #[test]
+    fn passing_output_under_its_own_grant_after_a_mute_does_not_exceed_it() {
+        let report = api::Report {
+            output: api::Output::Passing,
+            output_grant: Some(grant(api::Permission::Permitted)),
+            applied: Some(grant(api::Permission::Denied)),
+            ..report()
+        };
+
+        assert!(!exceeded(&report));
     }
 
     #[tokio::test(flavor = "local")]

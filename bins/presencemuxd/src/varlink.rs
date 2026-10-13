@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use presencemux_api::{
-    CamStatus, CamStream, Cause, Error, Health, Host, MicStatus, Mute, Permission, Presets, Status,
+    CamStatus, CamStream, Cause, Device, DeviceCondition, DeviceStatus, Error, Health, Host,
+    MicOutput, MicStatus, Mute, Owner, OwnerStatus, Permission, Presets, ReportState, Status,
 };
 use presencemux_core::{MicMute, Preset};
 use rustix::io::Errno;
@@ -126,7 +127,23 @@ impl Service {
     product = "presencemuxd",
     version = env!("CARGO_PKG_VERSION"),
     url = "https://github.com/jonas-meyer/presencemux",
-    types = [CamStatus, CamStream, MicStatus, Mute, Permission, Host, Health, Cause]
+    types = [
+        CamStatus,
+        CamStream,
+        MicStatus,
+        MicOutput,
+        OwnerStatus,
+        Owner,
+        ReportState,
+        DeviceCondition,
+        Device,
+        DeviceStatus,
+        Mute,
+        Permission,
+        Host,
+        Health,
+        Cause
+    ]
 )]
 impl Service {
     /// Returns the status.
@@ -245,7 +262,7 @@ mod tests {
         client.set_mic_mute(false).await.unwrap().unwrap();
 
         let status = client.describe().await.unwrap().unwrap();
-        assert_eq!(status.mic.desired, Mute::Unmuted);
+        assert_eq!(status.mic.requested, Mute::Unmuted);
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]
@@ -255,7 +272,7 @@ mod tests {
         client.set_cam("brb").await.unwrap().unwrap();
 
         let status = client.describe().await.unwrap().unwrap();
-        assert_eq!(status.cam.desired, "brb");
+        assert_eq!(status.cam.requested, "brb");
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]
@@ -319,7 +336,7 @@ mod tests {
         other.set_mic_mute(false).await.unwrap().unwrap();
 
         let next = statuses.next().await.unwrap().unwrap().unwrap();
-        assert_eq!(next.mic.desired, Mute::Unmuted);
+        assert_eq!(next.mic.requested, Mute::Unmuted);
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]

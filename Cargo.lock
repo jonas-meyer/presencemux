@@ -997,6 +997,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "presencemux-api",
+ "rustix",
  "thiserror",
  "tokio",
  "tokio-stream",

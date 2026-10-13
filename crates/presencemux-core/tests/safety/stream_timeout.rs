@@ -2,7 +2,7 @@ use presencemux_core::{CamStream, Cause, Command, Effects, Epoch, Observation, O
 use proptest::prelude::*;
 
 use crate::support::{
-    after, cause_after_lowering, events, observations, preset_setting, stream_report,
+    after, events, hold_after_lowering, observations, preset_setting, stream_report,
 };
 
 proptest! {
@@ -15,10 +15,10 @@ proptest! {
 
         let _ = controller.handle_input(Observation::StreamTimeout(epoch).into());
 
-        prop_assert_eq!(controller.plane(PlaneId::Cam).requested, OnAir::Off);
+        prop_assert_eq!(controller.plane(PlaneId::Cam).granted, OnAir::Off);
         prop_assert_eq!(
-            controller.plane(PlaneId::Cam).cause,
-            cause_after_lowering(before.plane(PlaneId::Cam), Cause::StreamStopped)
+            controller.plane(PlaneId::Cam).hold,
+            hold_after_lowering(before.plane(PlaneId::Cam), Cause::StreamStopped)
         );
         prop_assert_eq!(controller.plane(PlaneId::Mic), before.plane(PlaneId::Mic));
     }
@@ -60,7 +60,7 @@ proptest! {
 
         let _ = controller.handle_input(Observation::StreamTimeout(Epoch::new(u32::MAX)).into());
 
-        prop_assert_eq!(controller.plane(PlaneId::Cam).requested, OnAir::Off);
+        prop_assert_eq!(controller.plane(PlaneId::Cam).granted, OnAir::Off);
     }
 
     #[test]
@@ -72,7 +72,7 @@ proptest! {
 
         for observation in later {
             let _ = controller.handle_input(observation.into());
-            prop_assert_eq!(controller.plane(PlaneId::Cam).on_air, OnAir::Off);
+            prop_assert_eq!(controller.plane(PlaneId::Cam).granted, OnAir::Off);
         }
     }
 }

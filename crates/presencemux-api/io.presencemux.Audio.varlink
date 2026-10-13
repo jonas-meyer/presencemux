@@ -17,8 +17,13 @@ gate: DeviceStatus, #  The state of the USB audio interface.
 interface: DeviceStatus, #  The latch, if the gate is latched.
 latched: ?Latch, #  Why the gate rejected the lease of this call. Null after an accepted
 #  lease and in `Describe`.
-rejected: ?Rejection, #  Whether the gate passes audio now.
-open: bool)
+rejected: ?Rejection, #  The audio that the gate sends to the gadget, from the last cycle of
+#  its real-time thread.
+output: Output, #  The grant of the lease under which the gate wrote the cycle of
+#  `output`. Null for a cycle without a valid lease.
+outputGrant: ?Grant, #  The grant of the lease that the gate applies. Null without a valid
+#  lease.
+applied: ?Grant)
 
 #  The state of the gate or the audio interface.
 type DeviceStatus (missing, initializing, ready, fault)
@@ -47,6 +52,20 @@ type Rejection (
 	#  The lease has an older epoch than the last lease of its session.
 	old_epoch
 )
+
+#  The audio that the gate sends to the gadget.
+type Output (
+	#  Digital silence, or no cycle in the last 100 ms.
+	silent,
+	#  Audio with a falling gain, after a lease that closes the gate.
+	closing,
+	#  Audio with a gain above 0 while the gate opens or is open.
+	passing
+)
+
+#  The grant of a lease: the session, the epoch and the permission.
+type Grant (#  The start time of the daemon run that sent the lease.
+sessionUSec: int, epoch: int, permission: Permission)
 
 #  Accepts or rejects a lease, and returns the report.
 method Renew(lease: Lease) -> (report: Report)

@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use pipewire::context::ContextRc;
 use pipewire::core::PW_ID_CORE;
@@ -23,7 +24,7 @@ use pipewire::spa::utils::dict::DictRef;
 use pipewire::stream::{Stream, StreamFlags, StreamRc, StreamState};
 use pipewire::types::ObjectType;
 use pipewire::{keys, spa};
-use presencemux_api::audio::DeviceStatus;
+use presencemux_api::audio::{DeviceStatus, Output};
 use tokio::sync::oneshot;
 use zerocopy::FromBytes;
 
@@ -49,18 +50,37 @@ const SAMPLE_SIZE: usize = size_of::<f32>();
 )]
 const STRIDE: i32 = SAMPLE_SIZE as i32;
 
-/// The gate word of a lease that denies the mic. The gate closes with a ramp.
+/// The state of a gate word for a lease that denies the mic. The gate closes
+/// with a ramp.
 pub(crate) const DENIED: u64 = 0;
-/// The gate word without a valid lease, or with a latch. It is a time in the
-/// past. The gate closes at once.
+/// The state of a gate word without a valid lease, or with a latch. The gate
+/// closes at once.
 pub(crate) const BLOCKED: u64 = 1;
+/// The bits of the state in a gate word, the low 48 bits.
+const STATE_MASK: u64 = (1 << GENERATION_SHIFT) - 1;
+/// The position of the generation in a gate word, the high 16 bits.
+const GENERATION_SHIFT: u32 = 48;
+
+/// The age in milliseconds at which a cycle gives no output, 100 ms.
+const MAX_CYCLE_AGE_MILLIS: u64 = 100;
+/// The position of the generation in a cycle word, bits 2 to 17.
+const CYCLE_GENERATION_SHIFT: u32 = 2;
+/// The position of the time in a cycle word, bits 18 to 63.
+const CYCLE_TIME_SHIFT: u32 = 18;
+/// The output state of a cycle word that writes no audio.
+const CYCLE_SILENT: u64 = 0;
+/// The output state of a cycle word with the closing ramp.
+const CYCLE_CLOSING: u64 = 1;
+/// The output state of a cycle word that passes audio.
+const CYCLE_PASSING: u64 = 2;
 
 /// The state that the PipeWire thread shares with the other threads.
 #[derive(Debug)]
 pub(crate) struct RtState {
-    /// The gate for the real-time thread: [`DENIED`], [`BLOCKED`], or the time
-    /// on `CLOCK_MONOTONIC` in nanoseconds before which the gate passes audio.
+    /// The gate for the real-time thread, as a word from [`gate_word`].
     gate: AtomicU64,
+    /// The last cycle of the real-time thread, as a word from [`cycle_word`].
+    cycle: AtomicU64,
     /// The state of the capture stream.
     capture: AtomicU8,
     /// The state of the playback stream.
@@ -70,11 +90,12 @@ pub(crate) struct RtState {
 }
 
 impl Default for RtState {
-    /// Returns a state with a blocked gate, two starting streams and no audio
-    /// interface.
+    /// Returns a state with a blocked gate of generation 0, two streams in their
+    /// start state and no audio interface.
     fn default() -> Self {
         Self {
-            gate: AtomicU64::new(BLOCKED),
+            gate: AtomicU64::new(gate_word(gate::State::Blocked, 0)),
+            cycle: AtomicU64::new(cycle_word(0, 0, Output::Silent)),
             capture: AtomicU8::new(STARTING),
             playback: AtomicU8::new(STARTING),
             interface: AtomicBool::new(false),
@@ -83,24 +104,47 @@ impl Default for RtState {
 }
 
 impl RtState {
-    /// Passes the state of the gate to the real-time thread. An open time
-    /// out of range blocks the gate.
-    pub(crate) fn set_gate(&self, state: gate::State) {
-        let word = match state {
-            gate::State::Open { until } => u64::try_from(until.as_nanos())
-                .ok()
-                .filter(|&until| until > BLOCKED)
-                .unwrap_or(BLOCKED),
-            gate::State::Denied => DENIED,
-            gate::State::Blocked => BLOCKED,
-        };
-        self.gate.store(word, Ordering::Release);
+    /// Passes the state of the gate and its generation to the real-time
+    /// thread. An open time out of range blocks the gate.
+    pub(crate) fn set_gate(&self, state: gate::State, generation: u16) {
+        self.gate
+            .store(gate_word(state, generation), Ordering::Release);
+    }
+
+    /// Publishes a cycle of the real-time thread at `now`, in nanoseconds on
+    /// `CLOCK_MONOTONIC`. `gate` is the gate word of the cycle. `output` is
+    /// the audio that the cycle wrote.
+    pub(crate) fn publish_cycle(&self, now: u64, gate: u64, output: Output) {
+        self.cycle.store(
+            cycle_word(now / 1_000_000, generation(gate), output),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Returns the last cycle of the real-time thread at `now`, or `None` if
+    /// the cycle is 100 ms old or older.
+    pub(crate) fn last_cycle(&self, now: Duration) -> Option<Cycle> {
+        let now = u64::try_from(now.as_millis()).unwrap_or(u64::MAX);
+        cycle(self.cycle.load(Ordering::Relaxed), now)
     }
 
     /// Returns the gate word for the real-time thread.
     #[cfg(test)]
     pub(crate) fn gate_word(&self) -> u64 {
         self.gate.load(Ordering::Acquire)
+    }
+
+    /// Returns the state of the gate word: [`DENIED`], [`BLOCKED`] or the
+    /// open time in microseconds.
+    #[cfg(test)]
+    pub(crate) fn gate_state(&self) -> u64 {
+        self.gate_word() & STATE_MASK
+    }
+
+    /// Returns the generation of the gate word.
+    #[cfg(test)]
+    pub(crate) fn gate_generation(&self) -> u16 {
+        generation(self.gate_word())
     }
 
     /// Returns the status of the gate from the state of its two streams.
@@ -125,6 +169,69 @@ impl RtState {
             DeviceStatus::Missing
         }
     }
+}
+
+/// Returns the gate word of `state` with `generation`. The high 16 bits are
+/// `generation`. The low 48 bits are [`DENIED`], [`BLOCKED`], or the time on
+/// `CLOCK_MONOTONIC` in microseconds before which the gate passes audio. An
+/// open time that is not above [`BLOCKED`] or that does not fit 48 bits gives
+/// [`BLOCKED`].
+pub(crate) fn gate_word(state: gate::State, generation: u16) -> u64 {
+    let state = match state {
+        gate::State::Open { until } => u64::try_from(until.as_micros())
+            .ok()
+            .filter(|&until| until > BLOCKED && until <= STATE_MASK)
+            .unwrap_or(BLOCKED),
+        gate::State::Denied => DENIED,
+        gate::State::Blocked => BLOCKED,
+    };
+    (u64::from(generation) << GENERATION_SHIFT) | state
+}
+
+/// Returns the generation of the gate word `word`.
+fn generation(word: u64) -> u16 {
+    // The shift leaves 16 bits.
+    u16::try_from(word >> GENERATION_SHIFT).unwrap_or(u16::MAX)
+}
+
+/// A cycle of the real-time thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Cycle {
+    /// The audio that the cycle wrote.
+    pub(crate) output: Output,
+    /// The generation of the gate word that the cycle used.
+    pub(crate) generation: u16,
+}
+
+/// Returns the word of a cycle at `time`, in milliseconds on
+/// `CLOCK_MONOTONIC`. Bits 0 and 1 are the output state, bits 2 to 17 are
+/// `generation`, bits 18 to 63 are `time`.
+fn cycle_word(time: u64, generation: u16, output: Output) -> u64 {
+    let state = match output {
+        Output::Silent => CYCLE_SILENT,
+        Output::Closing => CYCLE_CLOSING,
+        Output::Passing => CYCLE_PASSING,
+    };
+    (time << CYCLE_TIME_SHIFT) | (u64::from(generation) << CYCLE_GENERATION_SHIFT) | state
+}
+
+/// Returns the cycle in `word` at `now`, in milliseconds on
+/// `CLOCK_MONOTONIC`, or `None` if the cycle is [`MAX_CYCLE_AGE_MILLIS`] old
+/// or older. An unknown output state gives `Passing`.
+fn cycle(word: u64, now: u64) -> Option<Cycle> {
+    let time = word >> CYCLE_TIME_SHIFT;
+    if now.saturating_sub(time) >= MAX_CYCLE_AGE_MILLIS {
+        return None;
+    }
+    let output = match word & 0b11 {
+        CYCLE_SILENT => Output::Silent,
+        CYCLE_CLOSING => Output::Closing,
+        _ => Output::Passing,
+    };
+    Some(Cycle {
+        output,
+        generation: u16::try_from((word >> CYCLE_GENERATION_SHIFT) & 0xFFFF).unwrap_or(u16::MAX),
+    })
 }
 
 /// A stream that does not run yet.
@@ -379,14 +486,17 @@ fn state_changed(
 /// Reads the newest capture buffer and writes the gated samples to the
 /// playback buffer. Runs on the real-time thread.
 fn gate_cycle(capture: &Stream, playback: &Stream, fader: &mut Fader, rt: &RtState) {
+    let now = clock::now_nanos();
+    let gate = rt.gate.load(Ordering::Acquire);
     let mut input = None;
     while let Some(buffer) = capture.dequeue_buffer() {
         input = Some(buffer);
     }
     let Some(mut output) = playback.dequeue_buffer() else {
+        rt.publish_cycle(now, gate, Output::Silent);
         return;
     };
-    let mode = mode(rt.gate.load(Ordering::Acquire), clock::now_nanos());
+    let mode = mode(gate, now / 1_000);
     let requested = usize::try_from(output.requested()).unwrap_or(usize::MAX);
     let in_samples = input
         .as_mut()
@@ -398,50 +508,80 @@ fn gate_cycle(capture: &Stream, playback: &Stream, fader: &mut Fader, rt: &RtSta
         });
     // A buffer without a data plane carries no samples.
     let Some(out_data) = output.datas_mut().first_mut() else {
+        rt.publish_cycle(now, gate, Output::Silent);
         return;
     };
-    let frames = out_data
+    let written = out_data
         .data()
         .and_then(samples_mut)
-        .map_or(0, |out_samples| {
+        .map_or(Written::NOTHING, |out_samples| {
             gate_frames(in_samples, out_samples, requested, mode, fader)
         });
     let chunk = out_data.chunk_mut();
     *chunk.offset_mut() = 0;
     *chunk.stride_mut() = STRIDE;
-    *chunk.size_mut() = u32::try_from(frames * SAMPLE_SIZE).unwrap_or(0);
+    *chunk.size_mut() = u32::try_from(written.frames * SAMPLE_SIZE).unwrap_or(0);
+    rt.publish_cycle(now, gate, written.output);
 }
 
 /// Returns the mode of the fader for the gate word `word` at `now`, in
-/// nanoseconds on `CLOCK_MONOTONIC`.
+/// microseconds on `CLOCK_MONOTONIC`.
 fn mode(word: u64, now: u64) -> Mode {
-    if word == DENIED {
-        Mode::Close
-    } else if now < word {
-        Mode::Open
-    } else {
-        Mode::Cut
+    match word & STATE_MASK {
+        DENIED => Mode::Close,
+        BLOCKED => Mode::Cut,
+        until if now < until => Mode::Open,
+        _ => Mode::Cut,
     }
 }
 
+/// The frames that one cycle writes to the gadget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Written {
+    /// The number of frames.
+    frames: usize,
+    /// The audio in the frames.
+    output: Output,
+}
+
+impl Written {
+    /// A cycle that writes no frames.
+    const NOTHING: Self = Self {
+        frames: 0,
+        output: Output::Silent,
+    };
+}
+
 /// Writes the gated `input` to `output`, or `requested` frames of zeros
-/// without input. Returns the number of frames, at most the size of
-/// `output`.
+/// without input. Returns the frames, at most the size of `output`. The
+/// frames hold audio if the gain is above 0 at the start or at the end of the
+/// cycle. Audio in `Open` mode is `Passing`, audio in `Close` mode is
+/// `Closing`.
 fn gate_frames(
     input: Option<&[f32]>,
     output: &mut [f32],
     requested: usize,
     mode: Mode,
     fader: &mut Fader,
-) -> usize {
+) -> Written {
     if let Some(input) = input {
         let frames = input.len().min(output.len());
+        let open_at_start = !fader.is_closed();
         fader.process(&input[..frames], &mut output[..frames], mode);
-        frames
+        let audio = frames > 0 && (open_at_start || !fader.is_closed());
+        let output = match mode {
+            Mode::Open if audio => Output::Passing,
+            Mode::Close if audio => Output::Closing,
+            Mode::Open | Mode::Close | Mode::Cut => Output::Silent,
+        };
+        Written { frames, output }
     } else {
         let frames = requested.min(output.len());
         fader.silence(&mut output[..frames]);
-        frames
+        Written {
+            frames,
+            output: Output::Silent,
+        }
     }
 }
 
@@ -463,55 +603,431 @@ fn samples_mut(bytes: &mut [u8]) -> Option<&mut [f32]> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use zerocopy::IntoBytes;
 
     use super::*;
 
     /// A time on `CLOCK_MONOTONIC` in nanoseconds.
     const NOW: u64 = 5_000_000_000;
+    /// [`NOW`] in microseconds.
+    const NOW_MICROS: u64 = 5_000_000;
+    /// [`NOW`] in milliseconds.
+    const NOW_MILLIS: u64 = 5_000;
+
+    /// Returns a fader at the end of its opening ramp of 240 samples.
+    fn open_fader() -> Fader {
+        let mut fader = Fader::default();
+        fader.process(&[1.0; 240], &mut [0.0; 240], Mode::Open);
+        fader
+    }
+
+    #[test]
+    fn open_cycle_passes_audio() {
+        let mut fader = open_fader();
+
+        let written = gate_frames(Some(&[1.0; 4]), &mut [0.0; 4], 4, Mode::Open, &mut fader);
+
+        assert_eq!(written.output, Output::Passing);
+    }
+
+    #[test]
+    fn opening_cycle_on_a_closed_fader_passes_audio() {
+        let written = gate_frames(
+            Some(&[1.0; 4]),
+            &mut [0.0; 4],
+            4,
+            Mode::Open,
+            &mut Fader::default(),
+        );
+
+        assert_eq!(written.output, Output::Passing);
+    }
+
+    #[test]
+    fn cut_cycle_on_an_open_fader_is_silent() {
+        let mut fader = open_fader();
+
+        let written = gate_frames(Some(&[1.0; 4]), &mut [0.0; 4], 4, Mode::Cut, &mut fader);
+
+        assert_eq!(written.output, Output::Silent);
+    }
+
+    #[test]
+    fn closing_cycle_on_a_closed_fader_is_silent() {
+        let written = gate_frames(
+            Some(&[1.0; 4]),
+            &mut [0.0; 4],
+            4,
+            Mode::Close,
+            &mut Fader::default(),
+        );
+
+        assert_eq!(written.output, Output::Silent);
+    }
+
+    #[test]
+    fn closing_ramp_on_an_open_fader_is_closing() {
+        let mut fader = open_fader();
+
+        let written = gate_frames(Some(&[1.0; 4]), &mut [0.0; 4], 4, Mode::Close, &mut fader);
+
+        assert_eq!(written.output, Output::Closing);
+    }
+
+    #[test]
+    fn closing_ramp_that_ends_in_the_cycle_is_closing() {
+        let mut fader = open_fader();
+
+        let written = gate_frames(
+            Some(&[1.0; 512]),
+            &mut [0.0; 512],
+            512,
+            Mode::Close,
+            &mut fader,
+        );
+
+        assert_eq!(written.output, Output::Closing);
+    }
+
+    #[test]
+    fn cycle_after_a_closing_ramp_is_silent() {
+        let mut fader = open_fader();
+        gate_frames(
+            Some(&[1.0; 512]),
+            &mut [0.0; 512],
+            512,
+            Mode::Close,
+            &mut fader,
+        );
+
+        let written = gate_frames(Some(&[1.0; 4]), &mut [0.0; 4], 4, Mode::Close, &mut fader);
+
+        assert_eq!(written.output, Output::Silent);
+    }
+
+    #[test]
+    fn open_cycle_without_frames_is_silent() {
+        let mut fader = open_fader();
+
+        let written = gate_frames(Some(&[]), &mut [0.0; 4], 4, Mode::Open, &mut fader);
+
+        assert_eq!(written.output, Output::Silent);
+    }
+
+    #[test]
+    fn open_cycle_without_input_is_silent() {
+        let mut fader = open_fader();
+
+        let written = gate_frames(None, &mut [0.0; 4], 4, Mode::Open, &mut fader);
+
+        assert_eq!(written.output, Output::Silent);
+    }
+
+    #[test]
+    fn passing_cycle_word_gives_passing_with_its_generation() {
+        let word = cycle_word(NOW_MILLIS, 7, Output::Passing);
+
+        assert_eq!(
+            cycle(word, NOW_MILLIS),
+            Some(Cycle {
+                output: Output::Passing,
+                generation: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn closing_cycle_word_gives_closing() {
+        let word = cycle_word(NOW_MILLIS, 7, Output::Closing);
+
+        assert_eq!(
+            cycle(word, NOW_MILLIS),
+            Some(Cycle {
+                output: Output::Closing,
+                generation: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn silent_cycle_word_gives_silent() {
+        let word = cycle_word(NOW_MILLIS, 7, Output::Silent);
+
+        assert_eq!(
+            cycle(word, NOW_MILLIS),
+            Some(Cycle {
+                output: Output::Silent,
+                generation: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn cycle_word_with_the_largest_generation_keeps_its_time_and_output() {
+        let word = cycle_word(NOW_MILLIS, 0xFFFF, Output::Closing);
+
+        assert_eq!(
+            cycle(word, NOW_MILLIS + 99),
+            Some(Cycle {
+                output: Output::Closing,
+                generation: 0xFFFF,
+            })
+        );
+    }
+
+    #[test]
+    fn cycle_word_with_an_unknown_output_state_gives_passing() {
+        let word = (NOW_MILLIS << 18) | 0b11;
+
+        assert_eq!(
+            cycle(word, NOW_MILLIS),
+            Some(Cycle {
+                output: Output::Passing,
+                generation: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn cycle_99_ms_old_gives_its_output() {
+        let word = cycle_word(NOW_MILLIS, 7, Output::Passing);
+
+        assert_eq!(
+            cycle(word, NOW_MILLIS + 99),
+            Some(Cycle {
+                output: Output::Passing,
+                generation: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn cycle_100_ms_old_gives_no_cycle() {
+        let word = cycle_word(NOW_MILLIS, 7, Output::Passing);
+
+        assert_eq!(cycle(word, NOW_MILLIS + 100), None);
+    }
+
+    #[test]
+    fn cycle_after_the_report_time_gives_its_output() {
+        let word = cycle_word(NOW_MILLIS, 7, Output::Passing);
+
+        assert_eq!(
+            cycle(word, NOW_MILLIS - 1),
+            Some(Cycle {
+                output: Output::Passing,
+                generation: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn new_rt_state_gives_no_cycle() {
+        let rt = RtState::default();
+
+        assert_eq!(rt.last_cycle(Duration::from_secs(5)), None);
+    }
+
+    #[test]
+    fn open_cycle_publishes_passing_with_the_generation_of_its_gate_word() {
+        let rt = RtState::default();
+        rt.set_gate(
+            gate::State::Open {
+                until: Duration::from_secs(7),
+            },
+            9,
+        );
+        let gate = rt.gate_word();
+        let written = gate_frames(
+            Some(&[1.0; 4]),
+            &mut [0.0; 4],
+            4,
+            mode(gate, NOW_MICROS),
+            &mut open_fader(),
+        );
+
+        rt.publish_cycle(NOW, gate, written.output);
+
+        assert_eq!(
+            rt.last_cycle(Duration::from_nanos(NOW)),
+            Some(Cycle {
+                output: Output::Passing,
+                generation: 9,
+            })
+        );
+    }
+
+    #[test]
+    fn closing_ramp_publishes_closing_with_the_generation_of_its_gate_word() {
+        let rt = RtState::default();
+        rt.set_gate(gate::State::Denied, 4);
+        let gate = rt.gate_word();
+        let written = gate_frames(
+            Some(&[1.0; 4]),
+            &mut [0.0; 4],
+            4,
+            mode(gate, NOW_MICROS),
+            &mut open_fader(),
+        );
+
+        rt.publish_cycle(NOW, gate, written.output);
+
+        assert_eq!(
+            rt.last_cycle(Duration::from_nanos(NOW)),
+            Some(Cycle {
+                output: Output::Closing,
+                generation: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn blocked_cycle_on_an_open_fader_publishes_silent() {
+        let rt = RtState::default();
+        rt.set_gate(gate::State::Blocked, 5);
+        let gate = rt.gate_word();
+        let written = gate_frames(
+            Some(&[1.0; 4]),
+            &mut [0.0; 4],
+            4,
+            mode(gate, NOW_MICROS),
+            &mut open_fader(),
+        );
+
+        rt.publish_cycle(NOW, gate, written.output);
+
+        assert_eq!(
+            rt.last_cycle(Duration::from_nanos(NOW)),
+            Some(Cycle {
+                output: Output::Silent,
+                generation: 5,
+            })
+        );
+    }
 
     #[test]
     fn denied_word_closes_with_the_ramp() {
-        assert_eq!(mode(DENIED, NOW), Mode::Close);
+        assert_eq!(mode(DENIED, NOW_MICROS), Mode::Close);
+    }
+
+    #[test]
+    fn denied_word_with_a_generation_closes_with_the_ramp() {
+        assert_eq!(mode(0xFFFF_0000_0000_0000, NOW_MICROS), Mode::Close);
     }
 
     #[test]
     fn blocked_word_cuts() {
-        assert_eq!(mode(BLOCKED, NOW), Mode::Cut);
+        assert_eq!(mode(BLOCKED, NOW_MICROS), Mode::Cut);
+    }
+
+    #[test]
+    fn blocked_word_at_time_0_cuts() {
+        assert_eq!(mode(BLOCKED, 0), Mode::Cut);
     }
 
     #[test]
     fn open_word_before_its_time_opens() {
-        assert_eq!(mode(NOW + 1, NOW), Mode::Open);
+        assert_eq!(mode(NOW_MICROS + 1, NOW_MICROS), Mode::Open);
     }
 
     #[test]
     fn open_word_at_its_time_cuts() {
-        assert_eq!(mode(NOW, NOW), Mode::Cut);
+        assert_eq!(mode(NOW_MICROS, NOW_MICROS), Mode::Cut);
     }
 
     #[test]
-    fn open_state_out_of_range_blocks_the_gate() {
-        let rt = RtState::default();
-
-        rt.set_gate(gate::State::Open {
-            until: Duration::MAX,
-        });
-
-        assert_eq!(rt.gate_word(), BLOCKED);
+    fn open_word_with_a_generation_before_its_time_opens() {
+        assert_eq!(mode(0x0003_0000_004C_4B41, NOW_MICROS), Mode::Open);
     }
 
     #[test]
-    fn open_state_gives_its_time_in_nanoseconds() {
-        let rt = RtState::default();
+    fn open_state_packs_the_generation_and_its_time_in_microseconds() {
+        let word = gate_word(
+            gate::State::Open {
+                until: Duration::from_secs(7),
+            },
+            3,
+        );
 
-        rt.set_gate(gate::State::Open {
-            until: Duration::from_secs(7),
-        });
+        assert_eq!(word, 0x0003_0000_006A_CFC0);
+    }
 
-        assert_eq!(rt.gate_word(), 7_000_000_000);
+    #[test]
+    fn generation_of_a_gate_word_is_its_high_16_bits() {
+        assert_eq!(generation(0x0003_0000_006A_CFC0), 3);
+    }
+
+    #[test]
+    fn denied_state_packs_the_generation_over_denied() {
+        assert_eq!(
+            gate_word(gate::State::Denied, 0xFFFF),
+            0xFFFF_0000_0000_0000
+        );
+    }
+
+    #[test]
+    fn blocked_state_packs_the_generation_over_blocked() {
+        assert_eq!(gate_word(gate::State::Blocked, 2), 0x0002_0000_0000_0001);
+    }
+
+    #[test]
+    fn open_state_out_of_range_of_duration_blocks_the_gate() {
+        let word = gate_word(
+            gate::State::Open {
+                until: Duration::MAX,
+            },
+            3,
+        );
+
+        assert_eq!(word, 0x0003_0000_0000_0001);
+    }
+
+    #[test]
+    fn open_state_above_48_bits_blocks_the_gate() {
+        let word = gate_word(
+            gate::State::Open {
+                until: Duration::from_micros(0x1_0000_0000_0000),
+            },
+            3,
+        );
+
+        assert_eq!(word, 0x0003_0000_0000_0001);
+    }
+
+    #[test]
+    fn open_state_at_the_largest_48_bit_time_keeps_its_time() {
+        let word = gate_word(
+            gate::State::Open {
+                until: Duration::from_micros(0xFFFF_FFFF_FFFF),
+            },
+            3,
+        );
+
+        assert_eq!(word, 0x0003_FFFF_FFFF_FFFF);
+    }
+
+    #[test]
+    fn open_state_at_one_microsecond_blocks_the_gate() {
+        let word = gate_word(
+            gate::State::Open {
+                until: Duration::from_micros(1),
+            },
+            3,
+        );
+
+        assert_eq!(word, 0x0003_0000_0000_0001);
+    }
+
+    #[test]
+    fn open_state_below_one_microsecond_blocks_the_gate() {
+        let word = gate_word(
+            gate::State::Open {
+                until: Duration::from_nanos(999),
+            },
+            3,
+        );
+
+        assert_eq!(word, 0x0003_0000_0000_0001);
     }
 
     #[test]
@@ -527,16 +1043,16 @@ mod tests {
     fn request_without_input_larger_than_the_output_gives_the_output_size() {
         let mut output = [9.0; 8];
 
-        let frames = gate_frames(None, &mut output, 100, Mode::Open, &mut Fader::default());
+        let written = gate_frames(None, &mut output, 100, Mode::Open, &mut Fader::default());
 
-        assert_eq!(frames, 8);
+        assert_eq!(written.frames, 8);
     }
 
     #[test]
     fn input_longer_than_the_output_gives_the_size_of_the_output() {
         let mut output = [9.0; 4];
 
-        let frames = gate_frames(
+        let written = gate_frames(
             Some(&[1.0; 6]),
             &mut output,
             6,
@@ -544,7 +1060,7 @@ mod tests {
             &mut Fader::default(),
         );
 
-        assert_eq!(frames, 4);
+        assert_eq!(written.frames, 4);
     }
 
     #[test]
@@ -599,19 +1115,8 @@ mod tests {
     }
 
     #[test]
-    fn new_rt_state_blocks_the_gate() {
+    fn new_rt_state_blocks_the_gate_with_generation_0() {
         let rt = RtState::default();
-
-        assert_eq!(rt.gate_word(), BLOCKED);
-    }
-
-    #[test]
-    fn open_state_at_one_nanosecond_blocks_the_gate() {
-        let rt = RtState::default();
-
-        rt.set_gate(gate::State::Open {
-            until: Duration::from_nanos(1),
-        });
 
         assert_eq!(rt.gate_word(), BLOCKED);
     }

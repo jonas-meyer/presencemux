@@ -14,10 +14,10 @@ mod policy;
 mod preset;
 mod report;
 
-pub use cam::{Cam, CamPermission, CamReport, CamStream, SlateId};
+pub use cam::{Cam, CamOutput, CamPermission, CamReport, CamStream, SlateId};
 pub use device::{Device, DeviceStatus, Health};
 pub use host::HostStatus;
-pub use mic::{Mic, MicMute, MicPermission, MicReport};
+pub use mic::{Mic, MicMute, MicOutput, MicPermission, MicReport};
 pub use on_air::OnAir;
 pub use plane::{Cause, Epoch, Granted, Plane, PlaneId, PlaneState, PlaneSummary, PrivacyPlane};
 pub use preset::Preset;
@@ -173,7 +173,7 @@ impl Controller {
     }
 
     pub fn health(&self) -> Health {
-        policy::health(self.cam.observed()).max(policy::health(self.mic.observed()))
+        policy::health::<Cam>(self.cam.observed()).max(policy::health::<Mic>(self.mic.observed()))
     }
 
     pub fn cam(&self) -> &PlaneState<Cam> {
@@ -239,6 +239,9 @@ mod tests {
             camera,
             stream: CamStream::Idle,
             latched: None,
+            output: CamOutput::Blank,
+            exceeded: false,
+            applied: None,
         }
     }
 
@@ -247,6 +250,9 @@ mod tests {
             gate,
             interface,
             latched: None,
+            output: MicOutput::Silent,
+            exceeded: false,
+            applied: None,
         }
     }
 
@@ -337,7 +343,7 @@ mod tests {
         let _ = controller.handle_input(Observation::Cam(cam(Fault, Fault)).into());
 
         assert_eq!(
-            controller.cam().cause(),
+            controller.cam().hold(),
             Some(Cause::DeviceFault(Device::CamWorker))
         );
     }
@@ -349,7 +355,7 @@ mod tests {
         let _ = controller.handle_input(Observation::Mic(mic(Fault, Missing)).into());
 
         assert_eq!(
-            controller.mic().cause(),
+            controller.mic().hold(),
             Some(Cause::DeviceFault(Device::Gate))
         );
     }
@@ -361,7 +367,7 @@ mod tests {
         let _ = controller.handle_input(Observation::Lost(PlaneId::Cam).into());
 
         assert_eq!(
-            controller.cam().cause(),
+            controller.cam().hold(),
             Some(Cause::OwnerLost(PlaneId::Cam))
         );
     }
@@ -388,7 +394,7 @@ mod tests {
 
         let _ = controller.handle_input(Observation::Cam(report).into());
 
-        assert_eq!(controller.cam().cause(), Some(Cause::ControllerStalled));
+        assert_eq!(controller.cam().hold(), Some(Cause::ControllerStalled));
     }
 
     #[test]
@@ -415,9 +421,156 @@ mod tests {
         let _ = controller.handle_input(Observation::Cam(report).into());
 
         assert_eq!(
-            controller.cam().cause(),
+            controller.cam().hold(),
             Some(Cause::DeviceFault(Device::Camera))
         );
+    }
+
+    #[test]
+    fn held_plane_keeps_the_request_of_the_user() {
+        let mut controller = live_controller();
+
+        let _ = controller.handle_input(Observation::Lost(PlaneId::Cam).into());
+
+        assert_eq!(controller.cam().requested(), CamPermission::Live);
+    }
+
+    #[test]
+    fn command_for_the_held_plane_clears_the_hold() {
+        let mut controller = live_controller();
+        let _ = controller.handle_input(Observation::Lost(PlaneId::Cam).into());
+
+        let _ = controller.handle_input(live());
+
+        assert_eq!(controller.cam().hold(), None);
+    }
+
+    #[test]
+    fn command_for_another_plane_keeps_the_hold() {
+        let mut controller = live_controller();
+        let _ = controller.handle_input(Observation::Lost(PlaneId::Cam).into());
+
+        let _ = controller.handle_input(
+            Command::Apply(Preset {
+                cam: None,
+                mic: Some(MicMute::Muted),
+            })
+            .into(),
+        );
+
+        assert_eq!(
+            controller.cam().hold(),
+            Some(Cause::OwnerLost(PlaneId::Cam))
+        );
+    }
+
+    #[test]
+    fn exceeded_output_lowers_the_plane_as_exceeded() {
+        let mut controller = live_controller();
+        let report = CamReport {
+            exceeded: true,
+            ..cam(Ready, Ready)
+        };
+
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        assert_eq!(
+            controller.cam().hold(),
+            Some(Cause::OutputExceeded(PlaneId::Cam))
+        );
+    }
+
+    #[test]
+    fn exceeded_output_keeps_the_mic_denied_after_a_command() {
+        let mut controller = live_controller();
+        let report = MicReport {
+            exceeded: true,
+            ..mic(Ready, Ready)
+        };
+        let _ = controller.handle_input(Observation::Mic(report).into());
+
+        let _ = controller.handle_input(live());
+
+        assert_eq!(controller.mic().target().permission, MicPermission::Denied);
+    }
+
+    #[test]
+    fn camera_fault_with_an_exceeded_output_gives_the_camera_fault() {
+        let mut controller = live_controller();
+        let report = CamReport {
+            exceeded: true,
+            ..cam(Ready, Fault)
+        };
+
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        assert_eq!(
+            controller.cam().hold(),
+            Some(Cause::DeviceFault(Device::Camera))
+        );
+    }
+
+    #[test]
+    fn health_is_fault_while_an_output_exceeds_its_grant() {
+        let report = MicReport {
+            exceeded: true,
+            ..mic(Ready, Ready)
+        };
+        let controller = after(&[
+            Observation::Cam(cam(Ready, Ready)).into(),
+            Observation::Mic(report).into(),
+        ]);
+
+        assert_eq!(controller.health(), Health::Fault);
+    }
+
+    #[test]
+    fn actual_level_is_unknown_while_the_owner_is_lost() {
+        let controller = after(&[Observation::Lost(PlaneId::Cam).into()]);
+
+        assert_eq!(controller.plane(PlaneId::Cam).actual, None);
+    }
+
+    #[test]
+    fn actual_level_comes_from_the_reported_output() {
+        let report = CamReport {
+            output: CamOutput::Slate(Some(SlateId(0))),
+            ..cam(Ready, Ready)
+        };
+        let controller = after(&[Observation::Cam(report).into()]);
+
+        assert_eq!(controller.plane(PlaneId::Cam).actual, Some(OnAir::Canned));
+    }
+
+    #[test]
+    fn target_is_in_effect_when_the_owner_applies_it() {
+        let mut controller = live_controller();
+        let report = CamReport {
+            output: CamOutput::Live,
+            exceeded: false,
+            applied: Some(controller.cam().target()),
+            ..cam(Ready, Ready)
+        };
+
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        assert!(controller.plane(PlaneId::Cam).in_effect);
+    }
+
+    #[test]
+    fn target_is_not_in_effect_while_the_owner_applies_an_older_grant() {
+        let mut controller = live_controller();
+        let report = CamReport {
+            applied: Some(Granted {
+                permission: CamPermission::Blank,
+                epoch: Epoch::BOOT,
+            }),
+            ..cam(Ready, Ready)
+        };
+
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        assert!(!controller.plane(PlaneId::Cam).in_effect);
     }
 
     #[test]
@@ -427,7 +580,7 @@ mod tests {
 
         let _ = controller.handle_input(Observation::StreamTimeout(epoch).into());
 
-        assert_eq!(controller.cam().cause(), Some(Cause::StreamStopped));
+        assert_eq!(controller.cam().hold(), Some(Cause::StreamStopped));
     }
 
     #[test]

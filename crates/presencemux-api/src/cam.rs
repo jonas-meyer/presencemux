@@ -59,8 +59,21 @@ pub struct Report {
     /// accepted lease and in `Describe`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejected: Option<Rejection>,
-    /// The frame that the cam worker sends.
-    pub shown: Shown,
+    /// The frames that the host gets. `nothing` means no stream. Otherwise it is
+    /// the kind of the last frame that the cam worker queued.
+    pub output: Output,
+    /// The name of the slate in `output`. Only a `slate` output has a name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slate: Option<String>,
+    /// The grant of the lease under which the cam worker queued the frame of
+    /// `output`. Null for `nothing`, or for a frame without a valid lease.
+    #[serde(rename = "outputGrant", skip_serializing_if = "Option::is_none")]
+    #[zlink(rename = "outputGrant")]
+    pub output_grant: Option<Grant>,
+    /// The grant of the lease that the cam worker applies. Null without a
+    /// valid lease.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied: Option<Grant>,
     /// Whether the host receives a stream.
     pub host: HostStream,
     /// A message for the logs, for example about an unknown slate.
@@ -152,14 +165,32 @@ impl fmt::Display for Rejection {
     }
 }
 
-/// The frame that the cam worker sends.
+/// The frames that the host gets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
 #[serde(rename_all = "snake_case")]
 #[zlink(rename_all = "snake_case")]
-pub enum Shown {
+pub enum Output {
+    /// The host receives no stream.
+    Nothing,
     Blank,
     Slate,
     Live,
+}
+
+/// The grant of a lease: the session, the epoch and the permission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
+#[serde(rename_all = "camelCase")]
+#[zlink(rename_all = "camelCase")]
+pub struct Grant {
+    /// The start time of the daemon run that sent the lease.
+    #[serde(rename = "sessionUSec")]
+    #[zlink(rename = "sessionUSec")]
+    pub session_usec: i64,
+    pub epoch: i64,
+    pub permission: Permission,
+    /// The name of the slate. Only a `slate` permission has a name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slate: Option<String>,
 }
 
 /// Whether the host receives a stream.

@@ -1,8 +1,8 @@
 use core::fmt::Write;
 
 use presencemux_core::{
-    CamPermission, CamReport, CamStream, Cause, Command, Controller, DeviceStatus, MicMute,
-    MicReport, Observation, PlaneId, Preset, Report, Reported, SlateId,
+    CamOutput, CamPermission, CamReport, CamStream, Cause, Command, Controller, DeviceStatus,
+    MicMute, MicOutput, MicReport, Observation, PlaneId, Preset, Report, Reported, SlateId,
 };
 
 use crate::support::{STATUSES, after};
@@ -19,6 +19,9 @@ fn cam_report(worker: DeviceStatus, camera: DeviceStatus) -> CamReport {
         camera,
         stream: CamStream::Idle,
         latched: None,
+        output: CamOutput::Blank,
+        exceeded: false,
+        applied: None,
     }
 }
 
@@ -27,6 +30,9 @@ fn mic_report(gate: DeviceStatus, interface: DeviceStatus) -> MicReport {
         gate,
         interface,
         latched: None,
+        output: MicOutput::Silent,
+        exceeded: false,
+        applied: None,
     }
 }
 
@@ -143,7 +149,7 @@ fn cam_cause() {
                 "{} | {} | {}",
                 describe(&before),
                 describe(&after),
-                cause(controller.cam().cause())
+                cause(controller.cam().hold())
             )
             .unwrap();
         }
@@ -172,7 +178,7 @@ fn mic_cause() {
                 "{} | {} | {}",
                 describe(&before),
                 describe(&after),
-                cause(controller.mic().cause())
+                cause(controller.mic().hold())
             )
             .unwrap();
         }

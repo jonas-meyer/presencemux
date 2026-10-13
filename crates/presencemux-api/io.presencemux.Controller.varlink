@@ -3,9 +3,14 @@ interface io.presencemux.Controller
 
 #  The state of the cam plane. Its values are `blank`, `live` or a slate name.
 type CamStatus (#  The value that the user asked for.
-desired: string, #  The value that the controller grants the cam worker.
-effective: string, #  Why automation lowered the plane. Null after the user sets the plane.
-cause: ?Cause, #  Whether the host receives the stream of the cam worker.
+requested: string, #  The value that the controller grants the cam worker.
+granted: string, #  The frames that the host gets, as the cam worker reports them. `nothing`
+#  means no stream. Null without a fresh report.
+actual: ?string, #  Whether the cam worker applies the grant of the controller.
+inEffect: bool, #  Whether the cam worker blocks live video after a latch.
+latched: bool, #  Why automation holds the plane at blank. Null after the user sets the
+#  plane.
+hold: ?Cause, #  Whether the host receives the stream of the cam worker.
 stream: CamStream)
 
 #  Whether the host receives the stream of the cam worker.
@@ -13,9 +18,55 @@ type CamStream (idle, streaming)
 
 #  The state of the mic plane.
 type MicStatus (#  The value that the user asked for.
-desired: Mute, #  Whether the controller lets the gate pass audio.
-effective: Permission, #  Why automation lowered the plane. Null after the user sets the plane.
-cause: ?Cause)
+requested: Mute, #  Whether the controller lets the gate pass audio.
+granted: Permission, #  The audio that the host gets, as the audio worker reports it. Null
+#  without a fresh report.
+actual: ?MicOutput, #  Whether the audio worker applies the grant of the controller.
+inEffect: bool, #  Whether the gate blocks the audio after a latch.
+latched: bool, #  Why automation holds the plane at muted. Null after the user sets the
+#  plane.
+hold: ?Cause)
+
+#  The audio that the host gets.
+type MicOutput (
+	#  The gate writes digital silence.
+	silent,
+	#  The gate passes audio with a falling gain, after a lease that closes
+	#  it.
+	closing,
+	#  The gate passes audio while it opens or is open.
+	passing
+)
+
+#  The state of a worker that owns devices.
+type OwnerStatus (owner: Owner, report: ReportState, #  The time of the last change of `report`, in `CLOCK_MONOTONIC`
+#  microseconds.
+sinceUSec: int, devices: []DeviceCondition, #  The rejection or the detail in the last report of the worker.
+message: ?string)
+
+#  A worker that owns devices.
+type Owner (cam_worker, audio_worker)
+
+#  Whether the controller has a fresh report of a worker.
+type ReportState (
+	#  No report since the start of the daemon.
+	pending,
+	fresh,
+	#  The worker does not reply, or sends no more reports.
+	lost
+)
+
+#  The condition of a device.
+type DeviceCondition (device: Device, status: DeviceStatus, #  The time of the last change of `status`, in `CLOCK_MONOTONIC`
+#  microseconds.
+sinceUSec: int)
+
+#  A device that a worker owns.
+type Device (camera, cam_worker, audio_interface, gate)
+
+#  The status of a device. `unknown` means that the controller has no fresh
+#  report of its worker.
+type DeviceStatus (unknown, missing, initializing, ready, fault)
 
 #  Whether the user wants the mic muted.
 type Mute (muted, unmuted)
@@ -27,7 +78,7 @@ type Permission (denied, permitted)
 type Host (disconnected, suspended, connected)
 
 #  The health of the devices. `degraded` means that a device is missing or
-#  not ready yet.
+#  not ready yet, or that a worker has not reported yet.
 type Health (ready, degraded, fault)
 
 #  The reason why automation lowered a plane.
@@ -36,10 +87,15 @@ type Cause (
 	cam_worker_fault,
 	#  The daemon has no contact with the cam worker.
 	cam_worker_lost,
+	#  The cam worker sends a frame above the grant under which it queued the
+	#  frame.
+	cam_output_exceeded,
 	audio_interface_fault,
 	gate_fault,
 	#  The daemon has no contact with the audio worker.
 	audio_worker_lost,
+	#  The gate passes audio without a grant that permits it.
+	mic_output_exceeded,
 	controller_stalled,
 	host_disconnected,
 	host_suspended,
@@ -48,13 +104,15 @@ type Cause (
 )
 
 #  Returns the status.
-method Describe() -> (cam: CamStatus, mic: MicStatus, host: Host, health: Health, #  The last preset that the user applied. Null after the user changes a
+method Describe() -> (cam: CamStatus, mic: MicStatus, #  The workers that own the devices, with the conditions of the devices.
+owners: []OwnerStatus, host: Host, health: Health, #  The last preset that the user applied. Null after the user changes a
 #  single plane.
 preset: ?string)
 
 #  Returns the status, then the status after each change. Without `more`,
 #  it returns the status once.
-method SubscribeStatus() -> (cam: CamStatus, mic: MicStatus, host: Host, health: Health, #  The last preset that the user applied. Null after the user changes a
+method SubscribeStatus() -> (cam: CamStatus, mic: MicStatus, #  The workers that own the devices, with the conditions of the devices.
+owners: []OwnerStatus, host: Host, health: Health, #  The last preset that the user applied. Null after the user changes a
 #  single plane.
 preset: ?string)
 

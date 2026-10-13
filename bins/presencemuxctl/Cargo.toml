@@ -9,6 +9,7 @@ description = "Command-line client for presencemuxd"
 [dependencies]
 clap.workspace = true
 presencemux-api.workspace = true
+rustix = { workspace = true, features = ["time"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt"] }
 tokio-stream.workspace = true

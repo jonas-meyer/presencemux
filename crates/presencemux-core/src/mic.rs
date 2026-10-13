@@ -50,9 +50,29 @@ pub struct MicReport {
     /// The epoch of the lease at the latch of the gate, if the gate is
     /// latched.
     pub latched: Option<Epoch>,
+    pub output: MicOutput,
+    /// Whether the output is above the grant under which the gate wrote it.
+    pub exceeded: bool,
+    /// The grant of the lease that the gate applies, if the gate has a valid
+    /// lease.
+    pub applied: Option<Granted<MicPermission>>,
+}
+
+/// The audio that the host gets now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MicOutput {
+    /// The gate writes digital silence.
+    Silent,
+    /// The gate passes audio with a falling gain, after a lease that closes
+    /// it.
+    Closing,
+    /// The gate passes audio while it opens or is open.
+    Passing,
 }
 
 impl Report for MicReport {
+    type Permission = MicPermission;
+
     fn devices(&self) -> [(Device, DeviceStatus); 2] {
         [
             (Device::Gate, self.gate),
@@ -62,6 +82,21 @@ impl Report for MicReport {
 
     fn latched(&self) -> Option<Epoch> {
         self.latched
+    }
+
+    fn output(&self) -> OnAir {
+        match self.output {
+            MicOutput::Silent => OnAir::Off,
+            MicOutput::Closing | MicOutput::Passing => OnAir::Live,
+        }
+    }
+
+    fn exceeded(&self) -> bool {
+        self.exceeded
+    }
+
+    fn applied(&self) -> Option<Granted<MicPermission>> {
+        self.applied
     }
 }
 

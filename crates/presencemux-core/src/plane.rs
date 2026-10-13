@@ -16,7 +16,9 @@ pub trait Plane {
 }
 
 /// A plane that can show the person or the room.
-pub trait PrivacyPlane: Plane<Target = Granted<Self::Permission>> {
+pub trait PrivacyPlane:
+    Plane<Target = Granted<Self::Permission>, Report: Report<Permission = Self::Permission>>
+{
     type Permission: Copy + PartialEq + Debug;
 
     fn on_air(permission: Self::Permission) -> OnAir;
@@ -40,9 +42,14 @@ impl PlaneId {
 pub struct PlaneSummary {
     /// The level that the user asked for.
     pub requested: OnAir,
-    /// The level that the plane shows now.
-    pub on_air: OnAir,
-    pub cause: Option<Cause>,
+    /// The level of the target of core.
+    pub granted: OnAir,
+    /// The level of the output that the owner reports. `None` without a fresh
+    /// report.
+    pub actual: Option<OnAir>,
+    /// Whether the owner applies the target of core.
+    pub in_effect: bool,
+    pub hold: Option<Cause>,
 }
 
 /// The number of the user command that granted a target. Epochs start at zero
@@ -79,6 +86,9 @@ pub enum Cause {
     DeviceFault(Device),
     /// The daemon has no contact with the owner of the devices of the plane.
     OwnerLost(PlaneId),
+    /// The owner of the devices of the plane sends more than the grant under
+    /// which it made the output permits.
+    OutputExceeded(PlaneId),
     ControllerStalled,
     Host(HostStatus),
     /// The host received no stream of the cam worker for the stream timeout.
@@ -87,10 +97,13 @@ pub enum Cause {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlaneState<P: Plane> {
-    pub(crate) desired: P::Desired,
+    /// The value of the last command that set this plane.
+    pub(crate) requested: P::Desired,
+    /// Why automation holds this plane at the safe value, until a command sets
+    /// it.
+    pub(crate) hold: Option<Cause>,
     pub(crate) observed: Reported<P::Report>,
     pub(crate) target: P::Target,
-    pub(crate) cause: Option<Cause>,
     /// The epoch of the last command that set this plane.
     pub(crate) epoch: Epoch,
 }
@@ -98,16 +111,25 @@ pub struct PlaneState<P: Plane> {
 impl<P: Plane> PlaneState<P> {
     pub(crate) fn new() -> Self {
         Self {
-            desired: P::Desired::default(),
+            requested: P::Desired::default(),
+            hold: None,
             observed: Reported::Pending,
             target: P::SAFE,
-            cause: None,
             epoch: Epoch::BOOT,
         }
     }
 
+    pub fn requested(&self) -> P::Desired {
+        self.requested
+    }
+
+    /// Returns the safe value while a hold is set, and the request otherwise.
     pub fn desired(&self) -> P::Desired {
-        self.desired
+        if self.hold.is_some() {
+            P::Desired::default()
+        } else {
+            self.requested
+        }
     }
 
     pub fn observed(&self) -> &Reported<P::Report> {
@@ -118,45 +140,50 @@ impl<P: Plane> PlaneState<P> {
         self.target
     }
 
-    /// Returns why automation lowered this plane, until the user sets it again.
-    pub fn cause(&self) -> Option<Cause> {
-        self.cause
+    /// Returns why automation holds this plane at the safe value, until a
+    /// command sets it.
+    pub fn hold(&self) -> Option<Cause> {
+        self.hold
     }
 
     pub fn summary(&self) -> PlaneSummary
     where
         P: PrivacyPlane,
     {
+        let fresh = match &self.observed {
+            Reported::Fresh(report) => Some(report),
+            Reported::Pending | Reported::Lost => None,
+        };
         PlaneSummary {
-            requested: P::requested(self.desired),
-            on_air: P::on_air(self.target.permission),
-            cause: self.cause,
+            requested: P::requested(self.requested),
+            granted: P::on_air(self.target.permission),
+            actual: fresh.map(Report::output),
+            in_effect: fresh.is_some_and(|report| report.applied() == Some(self.target)),
+            hold: self.hold,
         }
     }
 
-    pub(crate) fn set(&mut self, desired: P::Desired, epoch: Epoch) {
-        self.desired = desired;
+    pub(crate) fn set(&mut self, requested: P::Desired, epoch: Epoch) {
+        self.requested = requested;
         self.epoch = epoch;
-        self.cause = None;
+        self.hold = None;
     }
 
-    /// Sets the safe desired value. Records the cause only if the desired value
-    /// changes.
+    /// Holds the plane at the safe value. Sets the hold only if the desired
+    /// value changes.
     pub(crate) fn lower(&mut self, cause: Cause) {
-        let safe = P::Desired::default();
-        if self.desired != safe {
-            self.desired = safe;
-            self.cause = Some(cause);
+        if self.desired() != P::Desired::default() {
+            self.hold = Some(cause);
         }
     }
 
     /// Records `next`, and lowers the plane if `next` gives a cause.
     pub(crate) fn observe(&mut self, next: Reported<P::Report>)
     where
-        P::Report: Report,
+        P: PrivacyPlane,
     {
         let before = core::mem::replace(&mut self.observed, next);
-        if let Some(cause) = policy::cause(P::ID, &before, &next, self.epoch) {
+        if let Some(cause) = policy::cause::<P>(&before, &next, self.epoch) {
             self.lower(cause);
         }
     }

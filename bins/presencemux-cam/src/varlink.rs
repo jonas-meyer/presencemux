@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use presencemux_api::cam::{
-    self as api, Description, DeviceStatus, Error, HostStream, LatchReason, Lease, Permission,
-    Rejection, Renewed, Report, Shown,
+    self as api, Description, DeviceStatus, Error, Grant, HostStream, LatchReason, Lease,
+    Permission, Rejection, Renewed, Report,
 };
 use rustix::io::Errno;
 use tokio::net::{UnixListener, UnixStream};
@@ -17,7 +17,7 @@ use zlink::connection::Gid;
 use zlink::{Connection, Listener, Server};
 
 use crate::capture::CameraStatus;
-use crate::choice::{self, Choice};
+use crate::choice::{self, Choice, Shown};
 use crate::slate::Slates;
 use crate::v4l2::monotonic_now;
 
@@ -40,6 +40,9 @@ pub(crate) struct Control {
     pub(crate) streaming: bool,
     /// The capture time of the newest camera frame.
     pub(crate) newest: Option<Duration>,
+    /// The last frame that the worker queued in the stream. `None` without a
+    /// stream and before the first frame.
+    pub(crate) queued: Option<Queued>,
     /// The slates of the configuration.
     slates: Rc<Slates>,
 }
@@ -52,6 +55,7 @@ impl Control {
             camera: CameraStatus::Missing,
             streaming: false,
             newest: None,
+            queued: None,
             slates,
         }
     }
@@ -59,7 +63,9 @@ impl Control {
     /// Returns the report at the time `now`. `rejected` is the rejection of the
     /// lease in this call.
     fn report(&self, now: Duration, rejected: Option<choice::Rejection>) -> Report {
-        let (shown, detail) = frame(self.choice.shown(now, self.newest), &self.slates);
+        let queued = self.queued.as_ref();
+        let (output, slate) = output(self.streaming, queued.map(|queued| &queued.kind));
+        let lease = self.choice.lease(now);
         Report {
             worker: self.worker,
             camera: self.camera.into(),
@@ -69,15 +75,91 @@ impl Control {
                 reason: latch.reason.into(),
             }),
             rejected: rejected.map(rejection_to_wire),
-            shown,
+            output,
+            slate,
+            output_grant: output_grant(self.streaming, queued),
+            applied: lease.map(|lease| grant_to_wire(&lease.grant, &lease.permission)),
             host: if self.streaming {
                 HostStream::Streaming
             } else {
                 HostStream::Idle
             },
-            detail,
+            detail: detail(self.choice.shown(now, self.newest), &self.slates),
         }
     }
+}
+
+/// A frame that the worker queued on the gadget node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Queued {
+    pub(crate) kind: Kind,
+    /// The grant of the lease under which the worker queued the frame. `None`
+    /// without a valid lease.
+    pub(crate) grant: Option<Granted>,
+}
+
+impl Queued {
+    /// Returns the frame of the kind `kind` under `lease`.
+    fn new(kind: Shown<'_>, lease: Option<&choice::Lease>) -> Self {
+        Self {
+            kind: match kind {
+                Shown::Blank => Kind::Blank,
+                Shown::Slate(name) => Kind::Slate(name.to_owned()),
+                Shown::Live => Kind::Live,
+            },
+            grant: lease.map(|lease| Granted {
+                grant: lease.grant,
+                permission: lease.permission.clone(),
+            }),
+        }
+    }
+
+    /// Returns whether this frame has the kind `kind` and the grant of `lease`.
+    /// Compares by reference and allocates nothing.
+    fn is(&self, kind: Shown<'_>, lease: Option<&choice::Lease>) -> bool {
+        let same_kind = match (&self.kind, kind) {
+            (Kind::Blank, Shown::Blank) | (Kind::Live, Shown::Live) => true,
+            (Kind::Slate(name), Shown::Slate(other)) => name == other,
+            _ => false,
+        };
+        let same_grant = match (&self.grant, lease) {
+            (None, None) => true,
+            (Some(granted), Some(lease)) => {
+                granted.grant == lease.grant && granted.permission == lease.permission
+            }
+            _ => false,
+        };
+        same_kind && same_grant
+    }
+
+    /// Sets `queued` to the frame of the kind `kind` under `lease`. Allocates
+    /// only if `queued` holds a different frame.
+    pub(crate) fn record(
+        queued: &mut Option<Self>,
+        kind: Shown<'_>,
+        lease: Option<&choice::Lease>,
+    ) {
+        if queued.as_ref().is_some_and(|queued| queued.is(kind, lease)) {
+            return;
+        }
+        *queued = Some(Self::new(kind, lease));
+    }
+}
+
+/// The kind of a frame that the worker queued.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Blank,
+    /// A frame of the slate with this name.
+    Slate(String),
+    Live,
+}
+
+/// The grant of a lease with its permission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Granted {
+    pub(crate) grant: choice::Grant,
+    pub(crate) permission: choice::Permission,
 }
 
 impl From<CameraStatus> for DeviceStatus {
@@ -111,17 +193,30 @@ fn rejection_to_wire(rejection: choice::Rejection) -> Rejection {
     }
 }
 
-/// Returns the frame that the worker sends for `shown`, and a detail for the
-/// report. A slate without valid frames gives blank, and the detail names the
-/// error.
-fn frame(shown: choice::Shown<'_>, slates: &Slates) -> (Shown, Option<String>) {
+/// Returns the output of the report and its slate name. `streaming` is whether
+/// the host receives a stream. `queued` is the kind of the last queued frame.
+fn output(streaming: bool, queued: Option<&Kind>) -> (api::Output, Option<String>) {
+    match queued.filter(|_| streaming) {
+        None => (api::Output::Nothing, None),
+        Some(Kind::Blank) => (api::Output::Blank, None),
+        Some(Kind::Slate(name)) => (api::Output::Slate, Some(name.clone())),
+        Some(Kind::Live) => (api::Output::Live, None),
+    }
+}
+
+/// Returns the output grant of the report. `streaming` is whether the host
+/// receives a stream. `queued` is the last queued frame.
+fn output_grant(streaming: bool, queued: Option<&Queued>) -> Option<Grant> {
+    let granted = queued.filter(|_| streaming)?.grant.as_ref()?;
+    Some(grant_to_wire(&granted.grant, &granted.permission))
+}
+
+/// Returns the detail of the report for the frame `shown` of frame choice. A
+/// slate without valid frames gives the error.
+fn detail(shown: Shown<'_>, slates: &Slates) -> Option<String> {
     match shown {
-        choice::Shown::Blank => (Shown::Blank, None),
-        choice::Shown::Live => (Shown::Live, None),
-        choice::Shown::Slate(name) => match slates.get(name) {
-            Ok(_) => (Shown::Slate, None),
-            Err(error) => (Shown::Blank, Some(error.to_string())),
-        },
+        Shown::Slate(name) => slates.get(name).err().map(|error| error.to_string()),
+        Shown::Blank | Shown::Live => None,
     }
 }
 
@@ -150,13 +245,29 @@ fn lease_from_wire(lease: Lease) -> Result<choice::Lease, Error> {
     })
 }
 
-/// Returns `lease` in the wire types.
-fn lease_to_wire(lease: &choice::Lease) -> Lease {
-    let (permission, slate) = match &lease.permission {
+/// Returns `permission` in the wire types, with the slate name of a slate.
+fn permission_to_wire(permission: &choice::Permission) -> (Permission, Option<String>) {
+    match permission {
         choice::Permission::Blank => (Permission::Blank, None),
         choice::Permission::Slate(name) => (Permission::Slate, Some(name.clone())),
         choice::Permission::Live => (Permission::Live, None),
-    };
+    }
+}
+
+/// Returns `grant` with `permission` in the wire types.
+fn grant_to_wire(grant: &choice::Grant, permission: &choice::Permission) -> Grant {
+    let (permission, slate) = permission_to_wire(permission);
+    Grant {
+        session_usec: micros(grant.session),
+        epoch: i64::from(grant.epoch),
+        permission,
+        slate,
+    }
+}
+
+/// Returns `lease` in the wire types.
+fn lease_to_wire(lease: &choice::Lease) -> Lease {
+    let (permission, slate) = permission_to_wire(&lease.permission);
     Lease {
         session_usec: micros(lease.grant.session),
         epoch: i64::from(lease.grant.epoch),
@@ -302,7 +413,7 @@ impl Service {
     product = "presencemux-cam",
     version = env!("CARGO_PKG_VERSION"),
     url = "https://github.com/jonas-meyer/presencemux",
-    types = [Lease, Permission, Report, DeviceStatus, api::Latch, LatchReason, Rejection, Shown, HostStream]
+    types = [Lease, Permission, Report, DeviceStatus, api::Latch, LatchReason, Rejection, api::Output, Grant, HostStream]
 )]
 impl Service {
     /// Accepts or rejects a lease, and returns the report.
@@ -474,31 +585,25 @@ mod tests {
     }
 
     #[test]
-    fn valid_slate_shows_the_slate_without_a_detail() {
+    fn valid_slate_gives_no_detail() {
         let slates = Slates::with_slate("away", include_bytes!("../assets/slates/away.jpg"));
 
-        let shown = frame(choice::Shown::Slate("away"), &slates);
+        let detail = detail(Shown::Slate("away"), &slates);
 
-        assert_eq!(shown, (Shown::Slate, None));
+        assert_eq!(detail, None);
     }
 
     #[test]
-    fn invalid_slate_shows_blank_with_its_error() {
+    fn invalid_slate_gives_its_error_as_the_detail() {
         let slates = Slates::with_error("away", "the file is empty");
 
-        let shown = frame(choice::Shown::Slate("away"), &slates);
+        let detail = detail(Shown::Slate("away"), &slates);
 
-        assert_eq!(
-            shown,
-            (
-                Shown::Blank,
-                Some("slate away: the file is empty".to_owned())
-            )
-        );
+        assert_eq!(detail.as_deref(), Some("slate away: the file is empty"));
     }
 
     #[tokio::test(flavor = "local")]
-    async fn unknown_slate_shows_blank_with_a_detail() {
+    async fn unknown_slate_gives_a_detail() {
         let (mut client, _control) = connect();
 
         let renewed = client
@@ -507,11 +612,208 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(renewed.report.shown, Shown::Blank);
         assert_eq!(
             renewed.report.detail.as_deref(),
             Some("no slate named away")
         );
+    }
+
+    #[test]
+    fn queued_frame_without_a_stream_gives_nothing() {
+        let output = output(false, Some(&Kind::Live));
+
+        assert_eq!(output, (api::Output::Nothing, None));
+    }
+
+    #[test]
+    fn stream_before_the_first_queued_frame_gives_nothing() {
+        let output = output(true, None);
+
+        assert_eq!(output, (api::Output::Nothing, None));
+    }
+
+    #[test]
+    fn queued_blank_gives_blank() {
+        let output = output(true, Some(&Kind::Blank));
+
+        assert_eq!(output, (api::Output::Blank, None));
+    }
+
+    #[test]
+    fn queued_slate_gives_the_slate_with_its_name() {
+        let output = output(true, Some(&Kind::Slate("away".to_owned())));
+
+        assert_eq!(output, (api::Output::Slate, Some("away".to_owned())));
+    }
+
+    #[test]
+    fn queued_live_frame_gives_live() {
+        let output = output(true, Some(&Kind::Live));
+
+        assert_eq!(output, (api::Output::Live, None));
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn report_of_a_streaming_worker_has_its_queued_frame() {
+        let (mut client, control) = connect();
+        {
+            let mut control = control.borrow_mut();
+            control.streaming = true;
+            control.queued = Some(Queued {
+                kind: Kind::Slate("away".to_owned()),
+                grant: None,
+            });
+        }
+
+        let renewed = client
+            .renew(&lease(0, Permission::Blank, None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            (renewed.report.output, renewed.report.slate),
+            (api::Output::Slate, Some("away".to_owned()))
+        );
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn report_after_a_downgrade_has_the_output_grant_of_the_queued_frame() {
+        let (mut client, control) = connect();
+        client
+            .renew(&lease(3, Permission::Live, None))
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let mut control = control.borrow_mut();
+            let control = &mut *control;
+            control.streaming = true;
+            let lease = control.choice.lease(monotonic_now());
+            Queued::record(&mut control.queued, Shown::Live, lease);
+        }
+
+        let renewed = client
+            .renew(&lease(4, Permission::Slate, Some("away")))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            (
+                renewed.report.output,
+                renewed.report.output_grant,
+                renewed.report.applied
+            ),
+            (
+                api::Output::Live,
+                Some(Grant {
+                    session_usec: SESSION_USEC,
+                    epoch: 3,
+                    permission: Permission::Live,
+                    slate: None,
+                }),
+                Some(Grant {
+                    session_usec: SESSION_USEC,
+                    epoch: 4,
+                    permission: Permission::Slate,
+                    slate: Some("away".to_owned()),
+                })
+            )
+        );
+    }
+
+    #[test]
+    fn queued_frame_without_a_stream_gives_no_output_grant() {
+        let queued = Queued {
+            kind: Kind::Live,
+            grant: Some(Granted {
+                grant: choice::Grant {
+                    session: Duration::from_secs(1),
+                    epoch: 3,
+                },
+                permission: choice::Permission::Live,
+            }),
+        };
+
+        let output_grant = output_grant(false, Some(&queued));
+
+        assert_eq!(output_grant, None);
+    }
+
+    #[test]
+    fn stream_before_the_first_queued_frame_gives_no_output_grant() {
+        let output_grant = output_grant(true, None);
+
+        assert_eq!(output_grant, None);
+    }
+
+    #[test]
+    fn queued_frame_without_a_lease_gives_no_output_grant() {
+        let queued = Queued {
+            kind: Kind::Blank,
+            grant: None,
+        };
+
+        let output_grant = output_grant(true, Some(&queued));
+
+        assert_eq!(output_grant, None);
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn unlatched_worker_applies_the_grant_of_its_lease() {
+        let (mut client, _control) = connect();
+        client
+            .renew(&lease(3, Permission::Blank, None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let renewed = client
+            .renew(&lease(4, Permission::Live, None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            renewed.report.applied,
+            Some(Grant {
+                session_usec: SESSION_USEC,
+                epoch: 4,
+                permission: Permission::Live,
+                slate: None,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn worker_latched_by_its_first_lease_applies_the_grant_of_the_lease() {
+        let (mut client, _control) = connect();
+
+        let renewed = client
+            .renew(&lease(3, Permission::Slate, Some("away")))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            renewed.report.applied,
+            Some(Grant {
+                session_usec: SESSION_USEC,
+                epoch: 3,
+                permission: Permission::Slate,
+                slate: Some("away".to_owned()),
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn worker_without_a_lease_applies_no_grant() {
+        let (mut client, _control) = connect();
+
+        let description = client.describe().await.unwrap().unwrap();
+
+        assert_eq!(description.report.applied, None);
     }
 
     #[tokio::test(flavor = "local")]

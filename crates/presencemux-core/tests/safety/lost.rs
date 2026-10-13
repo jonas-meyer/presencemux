@@ -1,7 +1,7 @@
 use presencemux_core::{Cause, Effects, Observation, OnAir, PlaneId};
 use proptest::prelude::*;
 
-use crate::support::{after, cause_after_lowering, events, observations, plane, ready_report};
+use crate::support::{after, events, hold_after_lowering, observations, plane, ready_report};
 
 proptest! {
     #[test]
@@ -12,10 +12,10 @@ proptest! {
 
         let _ = controller.handle_input(Observation::Lost(lost).into());
 
-        prop_assert_eq!(controller.plane(lost).requested, OnAir::Off);
+        prop_assert_eq!(controller.plane(lost).granted, OnAir::Off);
         prop_assert_eq!(
-            controller.plane(lost).cause,
-            cause_after_lowering(before.plane(lost), Cause::OwnerLost(lost))
+            controller.plane(lost).hold,
+            hold_after_lowering(before.plane(lost), Cause::OwnerLost(lost))
         );
         for other in PlaneId::ALL.into_iter().filter(|&p| p != lost) {
             prop_assert_eq!(controller.plane(other), before.plane(other));
@@ -34,7 +34,7 @@ proptest! {
 
         for observation in later {
             let _ = controller.handle_input(observation.into());
-            prop_assert_eq!(controller.plane(lost).on_air, OnAir::Off);
+            prop_assert_eq!(controller.plane(lost).granted, OnAir::Off);
         }
     }
 

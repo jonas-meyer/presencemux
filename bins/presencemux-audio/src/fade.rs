@@ -57,6 +57,11 @@ impl Fader {
         }
     }
 
+    /// Returns whether the gain is 0.
+    pub(crate) fn is_closed(self) -> bool {
+        self.position == 0
+    }
+
     /// Writes `0.0` to `output` and sets the gain to 0 at once.
     pub(crate) fn silence(&mut self, output: &mut [f32]) {
         self.position = 0;

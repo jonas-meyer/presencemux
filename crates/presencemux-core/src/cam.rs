@@ -44,9 +44,17 @@ pub struct CamReport {
     /// The epoch of the lease at the latch of the worker, if the worker is
     /// latched.
     pub latched: Option<Epoch>,
+    pub output: CamOutput,
+    /// Whether the output is above the grant under which the worker queued it.
+    pub exceeded: bool,
+    /// The grant of the lease that the worker applies, if the worker has a
+    /// valid lease.
+    pub applied: Option<Granted<CamPermission>>,
 }
 
 impl Report for CamReport {
+    type Permission = CamPermission;
+
     fn devices(&self) -> [(Device, DeviceStatus); 2] {
         [
             (Device::CamWorker, self.worker),
@@ -57,6 +65,33 @@ impl Report for CamReport {
     fn latched(&self) -> Option<Epoch> {
         self.latched
     }
+
+    fn output(&self) -> OnAir {
+        match self.output {
+            CamOutput::Nothing | CamOutput::Blank => OnAir::Off,
+            CamOutput::Slate(_) => OnAir::Canned,
+            CamOutput::Live => OnAir::Live,
+        }
+    }
+
+    fn exceeded(&self) -> bool {
+        self.exceeded
+    }
+
+    fn applied(&self) -> Option<Granted<CamPermission>> {
+        self.applied
+    }
+}
+
+/// The frames that the host gets now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CamOutput {
+    /// The host receives no stream.
+    Nothing,
+    Blank,
+    /// A slate, with its id if the daemon knows its name.
+    Slate(Option<SlateId>),
+    Live,
 }
 
 impl PlaneState<Cam> {

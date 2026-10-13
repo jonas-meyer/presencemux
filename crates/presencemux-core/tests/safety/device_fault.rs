@@ -2,7 +2,7 @@ use presencemux_core::{Cause, DeviceStatus, OnAir, PlaneId};
 use proptest::prelude::*;
 
 use crate::support::{
-    after, cause_after_lowering, device, events, not_fault, not_ready, observations, report_with,
+    after, device, events, hold_after_lowering, not_fault, not_ready, observations, report_with,
 };
 
 proptest! {
@@ -19,10 +19,10 @@ proptest! {
         let _ = controller.handle_input(report_with(failed, status).into());
 
         let lowered = controller.plane(failed.plane());
-        prop_assert_eq!(lowered.requested, OnAir::Off);
+        prop_assert_eq!(lowered.granted, OnAir::Off);
         prop_assert_eq!(
-            lowered.cause,
-            cause_after_lowering(before.plane(failed.plane()), Cause::DeviceFault(failed))
+            lowered.hold,
+            hold_after_lowering(before.plane(failed.plane()), Cause::DeviceFault(failed))
         );
         for other in PlaneId::ALL.into_iter().filter(|&p| p != failed.plane()) {
             prop_assert_eq!(controller.plane(other), before.plane(other));
@@ -40,7 +40,7 @@ proptest! {
 
         let _ = controller.handle_input(report_with(failed, DeviceStatus::Fault).into());
 
-        prop_assert_eq!(controller.plane(failed.plane()).requested, OnAir::Off);
+        prop_assert_eq!(controller.plane(failed.plane()).granted, OnAir::Off);
     }
 
     #[test]
@@ -55,7 +55,7 @@ proptest! {
 
         for observation in later {
             let _ = controller.handle_input(observation.into());
-            prop_assert_eq!(controller.plane(failed.plane()).on_air, OnAir::Off);
+            prop_assert_eq!(controller.plane(failed.plane()).granted, OnAir::Off);
         }
     }
 }

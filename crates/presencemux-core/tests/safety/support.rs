@@ -1,7 +1,7 @@
 use presencemux_core::{
-    CamPermission, CamReport, CamStream, Cause, Command, Controller, Device, DeviceStatus, Epoch,
-    Event, HostStatus, MicMute, MicReport, Observation, OnAir, PlaneId, PlaneSummary, Preset,
-    SlateId,
+    CamOutput, CamPermission, CamReport, CamStream, Cause, Command, Controller, Device,
+    DeviceStatus, Epoch, Event, Granted, HostStatus, MicMute, MicOutput, MicPermission, MicReport,
+    Observation, OnAir, PlaneId, PlaneSummary, Preset, SlateId,
 };
 use proptest::prelude::*;
 use proptest::sample::select;
@@ -22,13 +22,23 @@ pub(crate) fn after(events: impl IntoIterator<Item = Event>) -> Controller {
     controller
 }
 
-/// Returns the cause of a plane after automation lowers it. A plane that was
-/// already off keeps its cause.
-pub(crate) fn cause_after_lowering(before: PlaneSummary, cause: Cause) -> Option<Cause> {
-    if before.requested > OnAir::Off {
+/// Returns the highest level that a plane can reach. It is `Off` while
+/// automation holds the plane, and the request otherwise.
+pub(crate) fn held_level(summary: PlaneSummary) -> OnAir {
+    if summary.hold.is_some() {
+        OnAir::Off
+    } else {
+        summary.requested
+    }
+}
+
+/// Returns the hold of a plane after automation lowers it. A plane that was
+/// held or not requested keeps its hold.
+pub(crate) fn hold_after_lowering(before: PlaneSummary, cause: Cause) -> Option<Cause> {
+    if before.hold.is_none() && before.requested > OnAir::Off {
         Some(cause)
     } else {
-        before.cause
+        before.hold
     }
 }
 
@@ -52,11 +62,17 @@ pub(crate) fn report_with(device: Device, status: DeviceStatus) -> Observation {
             camera: status_of(Device::Camera),
             stream: CamStream::Idle,
             latched: None,
+            output: CamOutput::Blank,
+            exceeded: false,
+            applied: None,
         }),
         PlaneId::Mic => Observation::Mic(MicReport {
             gate: status_of(Device::Gate),
             interface: status_of(Device::AudioInterface),
             latched: None,
+            output: MicOutput::Silent,
+            exceeded: false,
+            applied: None,
         }),
     }
 }
@@ -70,11 +86,17 @@ pub(crate) fn ready_report(plane: PlaneId) -> Observation {
             camera: DeviceStatus::Ready,
             stream: CamStream::Idle,
             latched: None,
+            output: CamOutput::Blank,
+            exceeded: false,
+            applied: None,
         }),
         PlaneId::Mic => Observation::Mic(MicReport {
             gate: DeviceStatus::Ready,
             interface: DeviceStatus::Ready,
             latched: None,
+            output: MicOutput::Silent,
+            exceeded: false,
+            applied: None,
         }),
     }
 }
@@ -89,11 +111,41 @@ pub(crate) fn latched_report(plane: PlaneId, epoch: Epoch) -> Observation {
             camera: DeviceStatus::Ready,
             stream: CamStream::Idle,
             latched,
+            output: CamOutput::Blank,
+            exceeded: false,
+            applied: None,
         }),
         PlaneId::Mic => Observation::Mic(MicReport {
             gate: DeviceStatus::Ready,
             interface: DeviceStatus::Ready,
             latched,
+            output: MicOutput::Silent,
+            exceeded: false,
+            applied: None,
+        }),
+    }
+}
+
+/// Returns a report of the owner of the devices of `plane`, with every device
+/// ready and an output above its grant.
+pub(crate) fn exceeding_report(plane: PlaneId) -> Observation {
+    match plane {
+        PlaneId::Cam => Observation::Cam(CamReport {
+            worker: DeviceStatus::Ready,
+            camera: DeviceStatus::Ready,
+            stream: CamStream::Streaming,
+            latched: None,
+            output: CamOutput::Live,
+            exceeded: true,
+            applied: None,
+        }),
+        PlaneId::Mic => Observation::Mic(MicReport {
+            gate: DeviceStatus::Ready,
+            interface: DeviceStatus::Ready,
+            latched: None,
+            output: MicOutput::Passing,
+            exceeded: true,
+            applied: None,
         }),
     }
 }
@@ -106,6 +158,9 @@ pub(crate) fn stream_report(stream: CamStream) -> Observation {
         camera: DeviceStatus::Ready,
         stream,
         latched: None,
+        output: CamOutput::Blank,
+        exceeded: false,
+        applied: None,
     })
 }
 
@@ -114,23 +169,75 @@ fn latched() -> impl Strategy<Value = Option<Epoch>> {
     proptest::option::weighted(0.1, epoch())
 }
 
-pub(crate) fn cam_report() -> impl Strategy<Value = CamReport> {
-    (device_status(), device_status(), cam_stream(), latched()).prop_map(
-        |(worker, camera, stream, latched)| CamReport {
-            worker,
-            camera,
-            stream,
-            latched,
-        },
+/// Returns `true` for one report in ten.
+fn exceeded() -> impl Strategy<Value = bool> {
+    proptest::bool::weighted(0.1)
+}
+
+fn cam_output() -> impl Strategy<Value = CamOutput> {
+    select(
+        &[
+            CamOutput::Nothing,
+            CamOutput::Blank,
+            CamOutput::Slate(Some(SlateId(0))),
+            CamOutput::Live,
+        ][..],
     )
 }
 
+fn mic_output() -> impl Strategy<Value = MicOutput> {
+    select(&[MicOutput::Silent, MicOutput::Closing, MicOutput::Passing][..])
+}
+
+pub(crate) fn cam_report() -> impl Strategy<Value = CamReport> {
+    let applied = proptest::option::of(
+        (cam(), epoch()).prop_map(|(permission, epoch)| Granted { permission, epoch }),
+    );
+    (
+        device_status(),
+        device_status(),
+        cam_stream(),
+        latched(),
+        cam_output(),
+        exceeded(),
+        applied,
+    )
+        .prop_map(
+            |(worker, camera, stream, latched, output, exceeded, applied)| CamReport {
+                worker,
+                camera,
+                stream,
+                latched,
+                output,
+                exceeded,
+                applied,
+            },
+        )
+}
+
 pub(crate) fn mic_report() -> impl Strategy<Value = MicReport> {
-    (device_status(), device_status(), latched()).prop_map(|(gate, interface, latched)| MicReport {
-        gate,
-        interface,
-        latched,
-    })
+    let permission = select(&[MicPermission::Denied, MicPermission::Permitted][..]);
+    let applied = proptest::option::of(
+        (permission, epoch()).prop_map(|(permission, epoch)| Granted { permission, epoch }),
+    );
+    (
+        device_status(),
+        device_status(),
+        latched(),
+        mic_output(),
+        exceeded(),
+        applied,
+    )
+        .prop_map(
+            |(gate, interface, latched, output, exceeded, applied)| MicReport {
+                gate,
+                interface,
+                latched,
+                output,
+                exceeded,
+                applied,
+            },
+        )
 }
 
 pub(crate) fn device_status() -> impl Strategy<Value = DeviceStatus> {

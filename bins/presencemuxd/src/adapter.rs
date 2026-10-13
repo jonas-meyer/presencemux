@@ -46,6 +46,8 @@ pub(crate) struct Reply<R> {
     /// The latch of the owner in the session of this daemon, if the owner is
     /// latched. The report holds its epoch.
     pub(crate) latch: Option<Latch>,
+    /// The rejection or the detail in the reply.
+    pub(crate) message: Option<String>,
 }
 
 /// A block of a privacy plane at the owner until a lease with a newer grant
@@ -108,25 +110,28 @@ pub(crate) async fn drive<A: Adapter>(
             Ok(result) => result.map_err(|error| error.to_string()),
             Err(_) => Err(format!("no reply within {} ms", A::TIMEOUT.as_millis())),
         };
-        let observation = match result {
+        let (observation, message) = match result {
             Ok(reply) => {
                 backoff.restart();
                 if last_error.take().is_some() {
                     tracing::info!("the {} replies again", A::OWNER);
                 }
                 log_latch(A::OWNER, reply.latch, &mut last_latch);
-                reply.report.into()
+                (reply.report.into(), reply.message)
             }
             Err(message) => {
                 adapter.reset();
                 if last_error.as_ref() != Some(&message) {
                     tracing::warn!("exchange with the {} failed: {message}", A::OWNER);
-                    last_error = Some(message);
+                    last_error = Some(message.clone());
                 }
-                Observation::Lost(A::OWNER.plane())
+                (
+                    Observation::Lost(A::OWNER.plane()),
+                    Some(format!("exchange failed: {message}")),
+                )
             }
         };
-        if handle.report(A::OWNER, observation).await.is_err() {
+        if handle.report(A::OWNER, observation, message).await.is_err() {
             return;
         }
         if last_error.is_some() {
@@ -184,7 +189,7 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::task::spawn_local;
 
-    use presencemux_core::{CamReport, CamStream, DeviceStatus, PlaneId};
+    use presencemux_core::{CamOutput, CamReport, CamStream, DeviceStatus, PlaneId};
 
     use super::*;
     use crate::event_loop::Message;
@@ -244,8 +249,18 @@ mod tests {
     impl Driven {
         /// Returns the observation of the next report.
         async fn next_report(&mut self) -> Observation {
+            self.next().await.0
+        }
+
+        /// Returns the message of the next report.
+        async fn next_message(&mut self) -> Option<String> {
+            self.next().await.1
+        }
+
+        /// Returns the observation and the message of the next report.
+        async fn next(&mut self) -> (Observation, Option<String>) {
             match self.messages.recv().await {
-                Some(Message::Report(_, observation)) => observation,
+                Some(Message::Report(_, observation, message)) => (observation, message),
                 other => panic!("expected a report, got {other:?}"),
             }
         }
@@ -256,12 +271,16 @@ mod tests {
         camera: DeviceStatus::Ready,
         stream: CamStream::Idle,
         latched: None,
+        output: CamOutput::Blank,
+        exceeded: false,
+        applied: None,
     };
 
     fn ready_reply() -> Reply<CamReport> {
         Reply {
             report: READY,
             latch: None,
+            message: None,
         }
     }
 
@@ -334,6 +353,15 @@ mod tests {
         let observation = driven.next_report().await;
 
         assert_eq!(observation, Observation::Lost(PlaneId::Cam));
+    }
+
+    #[tokio::test(flavor = "local", start_paused = true)]
+    async fn failed_exchange_gives_its_error_as_the_message() {
+        let mut driven = start(vec![Script::Error]);
+
+        let message = driven.next_message().await;
+
+        assert_eq!(message.as_deref(), Some("exchange failed: invalid command"));
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]

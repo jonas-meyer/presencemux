@@ -2,16 +2,16 @@
 
 use crate::{
     Cam, CamPermission, CamStream, Cause, DeviceStatus, Epoch, Health, HostStatus, Mic, MicMute,
-    MicPermission, MicReport, PlaneId, PlaneState, Report, Reported,
+    MicPermission, MicReport, PlaneState, PrivacyPlane, Report, Reported,
 };
 
 /// Returns the effective cam permission. Live needs a ready camera and cam
-/// worker.
+/// worker. A worker that exceeds its grant gets blank.
 pub(crate) fn cam(state: &PlaneState<Cam>) -> CamPermission {
     let Reported::Fresh(report) = state.observed() else {
         return CamPermission::Blank;
     };
-    if !report.worker.is_ready() {
+    if !report.worker.is_ready() || report.exceeded {
         return CamPermission::Blank;
     }
     match (state.desired(), report.camera.is_ready()) {
@@ -22,12 +22,15 @@ pub(crate) fn cam(state: &PlaneState<Cam>) -> CamPermission {
 }
 
 /// Returns the effective mic permission. Permitted needs an unmuted mic, a
-/// ready audio interface and a ready gate.
+/// ready audio interface and a ready gate. A gate that exceeds its grant gets
+/// denied.
 pub(crate) fn mic(state: &PlaneState<Mic>) -> MicPermission {
     let devices_ready = match state.observed() {
-        Reported::Fresh(MicReport {
-            gate, interface, ..
-        }) => interface.is_ready() && gate.is_ready(),
+        Reported::Fresh(
+            report @ MicReport {
+                gate, interface, ..
+            },
+        ) => interface.is_ready() && gate.is_ready() && !report.exceeded,
         Reported::Pending | Reported::Lost => false,
     };
     match (state.desired(), devices_ready) {
@@ -43,22 +46,23 @@ pub(crate) fn stream_lowers(state: &PlaneState<Cam>, epoch: Epoch) -> bool {
     epoch >= state.epoch && state.stream() == CamStream::Idle
 }
 
-/// Returns the cause if the change from `before` to `after` lowers `plane`.
-/// `granted` is the epoch of the last command for `plane`. A lost owner comes
-/// first, then each device in the order of [`Report::devices`], then a latch.
-pub(crate) fn cause<R: Report>(
-    plane: PlaneId,
-    before: &Reported<R>,
-    after: &Reported<R>,
+/// Returns the cause if the change from `before` to `after` lowers the plane
+/// `P`. `granted` is the epoch of the last command for the plane. A lost owner
+/// comes first, then each device in the order of [`Report::devices`], then an
+/// output above its grant, then a latch.
+pub(crate) fn cause<P: PrivacyPlane>(
+    before: &Reported<P::Report>,
+    after: &Reported<P::Report>,
     granted: Epoch,
 ) -> Option<Cause> {
     let after = match after {
         Reported::Fresh(after) => after,
         Reported::Lost => {
-            return (!matches!(before, Reported::Lost)).then_some(Cause::OwnerLost(plane));
+            return (!matches!(before, Reported::Lost)).then_some(Cause::OwnerLost(P::ID));
         }
         Reported::Pending => return None,
     };
+    let exceeded = matches!(before, Reported::Fresh(before) if before.exceeded());
     let before = match before {
         Reported::Fresh(before) => before.devices().map(|(_, status)| status),
         Reported::Pending | Reported::Lost => [DeviceStatus::Missing; 2],
@@ -69,6 +73,7 @@ pub(crate) fn cause<R: Report>(
         .zip(before)
         .find(|&((_, status), before)| device_lowers(before, status))
         .map(|((device, _), _)| Cause::DeviceFault(device))
+        .or_else(|| (after.exceeded() && !exceeded).then_some(Cause::OutputExceeded(P::ID)))
         .or_else(|| {
             after
                 .latched()
@@ -89,13 +94,14 @@ pub(crate) fn host_lowers(before: HostStatus, after: HostStatus) -> bool {
     before == HostStatus::Connected && after != HostStatus::Connected
 }
 
-/// Returns `Fault` if a device has a fault or the owner is lost, `Degraded` if
-/// a device is not ready yet or the owner has not reported, and `Ready`
-/// otherwise.
-pub(crate) fn health<R: Report>(observed: &Reported<R>) -> Health {
+/// Returns `Fault` if a device has a fault, the owner is lost or exceeds its
+/// grant, `Degraded` if a device is not ready yet or the owner has not
+/// reported, and `Ready` otherwise.
+pub(crate) fn health<P: PrivacyPlane>(observed: &Reported<P::Report>) -> Health {
     match observed {
         Reported::Pending => Health::Degraded,
         Reported::Lost => Health::Fault,
+        Reported::Fresh(report) if report.exceeded() => Health::Fault,
         Reported::Fresh(report) => report
             .devices()
             .into_iter()

@@ -46,7 +46,7 @@ use crate::slate::Slates;
 use crate::systemd::Watchdog;
 use crate::uvc::{Action, Input, Limits, Uvc};
 use crate::v4l2::Queue;
-use crate::varlink::{Control, Service, Shared};
+use crate::varlink::{Control, Queued, Service, Shared};
 
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
@@ -176,7 +176,9 @@ async fn run() -> Result<(), Error> {
     );
 
     // Events can wait in the stored gadget node from before a restart.
-    worker.handle_events(node.as_fd()).map_err(Error::Events)?;
+    worker
+        .handle_events(node.as_fd(), &control)
+        .map_err(Error::Events)?;
     let node = AsyncFd::with_interest(node, Interest::PRIORITY).map_err(Error::Node)?;
     let mut frames = tokio::time::interval(FRAME_PERIOD);
     frames.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -187,7 +189,7 @@ async fn run() -> Result<(), Error> {
             _ = interrupt.recv() => break,
             guard = node.ready(Interest::PRIORITY) => {
                 let mut guard = guard.map_err(Error::Events)?;
-                worker.handle_events(node.get_ref().as_fd()).map_err(Error::Events)?;
+                worker.handle_events(node.get_ref().as_fd(), &control).map_err(Error::Events)?;
                 guard.clear_ready_matching(Ready::PRIORITY);
             }
             changed = discovery.changed() => {
@@ -238,7 +240,7 @@ struct Worker {
 
 impl Worker {
     /// Reads and handles each event that waits on the gadget node.
-    fn handle_events(&mut self, fd: BorrowedFd<'_>) -> io::Result<()> {
+    fn handle_events(&mut self, fd: BorrowedFd<'_>, control: &Shared) -> io::Result<()> {
         while let Some(event) = v4l2::dequeue_event(fd)? {
             let Some(input) = Input::parse(event.kind, event.payload()) else {
                 continue;
@@ -249,13 +251,13 @@ impl Worker {
                 _ => {}
             }
             if let Some(action) = self.uvc.handle(input) {
-                self.perform(fd, action);
+                self.perform(fd, control, action);
             }
         }
         Ok(())
     }
 
-    fn perform(&mut self, fd: BorrowedFd<'_>, action: Action) {
+    fn perform(&mut self, fd: BorrowedFd<'_>, control: &Shared, action: Action) {
         match action {
             Action::Respond(response) => {
                 let (length, data) = response.wire();
@@ -263,9 +265,10 @@ impl Worker {
                     tracing::warn!("cannot answer a setup request: {error}");
                 }
             }
-            Action::StartStream => self.start_stream(fd),
+            Action::StartStream => self.start_stream(fd, control),
             Action::StopStream => {
                 self.start_pending = false;
+                control.borrow_mut().queued = None;
                 if let Some(output) = self.output.take()
                     && let Err(error) = output.stop(fd)
                 {
@@ -278,10 +281,19 @@ impl Worker {
 
     /// Starts the stream and queues blank as the first frame. If the start
     /// fails, the stream start stays pending.
-    fn start_stream(&mut self, fd: BorrowedFd<'_>) {
+    fn start_stream(&mut self, fd: BorrowedFd<'_>, control: &Shared) {
         match Output::start(fd) {
             Ok(mut output) => {
-                let queued = output.queue(fd, BLANK);
+                let mut node = Node {
+                    output: &mut output,
+                    fd,
+                };
+                let now = v4l2::monotonic_now();
+                let mut control = control.borrow_mut();
+                let lease = control.choice.lease(now);
+                let mut taken = None;
+                let queued = queue(&mut node, BLANK, Shown::Blank, lease, &mut taken);
+                control.queued = taken;
                 self.output = Some(output);
                 self.start_pending = false;
                 self.frame_error = None;
@@ -310,7 +322,7 @@ impl Worker {
         trigger: Trigger,
     ) {
         if trigger == Trigger::Timer && self.start_pending {
-            self.start_stream(fd);
+            self.start_stream(fd, control);
             return;
         }
         let Some(output) = &mut self.output else {
@@ -321,43 +333,21 @@ impl Worker {
             return;
         }
         let now = v4l2::monotonic_now();
-        let control = control.borrow();
+        let mut control = control.borrow_mut();
+        let control = &mut *control;
         let shown = control.choice.shown(now, control.newest);
-        let live_queued = &mut self.live_queued;
-        let delays = &mut self.delays;
-        let slates = &self.slates;
-        let slate_loop = &mut self.slate_loop;
+        let mut sent = Sent {
+            lease: control.choice.lease(now),
+            slates: &self.slates,
+            slate_loop: &mut self.slate_loop,
+            live_queued: &mut self.live_queued,
+            delays: &mut self.delays,
+            queued: &mut control.queued,
+        };
         let result = capture.with_live_frame(|live| {
-            slate_loop.observe(shown);
-            match next_frame(shown, live, *live_queued, now, trigger) {
-                Next::Nothing => Ok(()),
-                Next::Blank => output.queue(fd, BLANK).map(drop),
-                Next::Slate(name) => match slates.get(name) {
-                    Ok(slate) => {
-                        match output.queue(fd, slate.frame(slate_loop.index(slate.id()))) {
-                            Ok(true) => {
-                                slate_loop.advance(slate.len());
-                                Ok(())
-                            }
-                            Ok(false) => Ok(()),
-                            Err(error) => output.queue(fd, BLANK).and(Err(error)),
-                        }
-                    }
-                    Err(_) => output.queue(fd, BLANK).map(drop),
-                },
-                Next::Live(live) => match output.queue(fd, live.frame) {
-                    Ok(false) => Ok(()),
-                    Ok(true) => {
-                        *live_queued = Some(live.frame.id);
-                        delays.record(live.times, v4l2::monotonic_now());
-                        Ok(())
-                    }
-                    Err(error) => {
-                        *live_queued = Some(live.frame.id);
-                        output.queue(fd, BLANK).and(Err(error))
-                    }
-                },
-            }
+            sent.slate_loop.observe(shown);
+            let next = next_frame(shown, live, *sent.live_queued, now, trigger);
+            sent.send(&mut Node { output, fd }, next)
         });
         match result {
             Ok(()) => self.frame_error = None,
@@ -397,6 +387,99 @@ impl Worker {
             tracing::warn!("{message}");
             self.frame_error = Some(message.to_owned());
         }
+    }
+}
+
+/// A UVC output that takes frames.
+trait Sink {
+    /// Queues `frame`. Returns `false` if no buffer is free.
+    fn queue(&mut self, frame: Frame<'_>) -> io::Result<bool>;
+}
+
+/// The stream of the gadget node.
+struct Node<'a> {
+    output: &'a mut Output,
+    fd: BorrowedFd<'a>,
+}
+
+impl Sink for Node<'_> {
+    fn queue(&mut self, frame: Frame<'_>) -> io::Result<bool> {
+        self.output.queue(self.fd, frame)
+    }
+}
+
+/// Queues `frame` of the kind `kind` on `sink`. If a buffer takes the frame,
+/// records `kind` and the grant of `lease` in `queued`.
+fn queue(
+    sink: &mut impl Sink,
+    frame: Frame<'_>,
+    kind: Shown<'_>,
+    lease: Option<&choice::Lease>,
+    queued: &mut Option<Queued>,
+) -> io::Result<bool> {
+    let result = sink.queue(frame);
+    if matches!(result, Ok(true)) {
+        Queued::record(queued, kind, lease);
+    }
+    result
+}
+
+/// The state that changes with each frame that the worker queues.
+struct Sent<'a> {
+    /// The valid lease of frame choice, if any.
+    lease: Option<&'a choice::Lease>,
+    /// The slates of the configuration.
+    slates: &'a Slates,
+    /// The position in the frames of the shown slate.
+    slate_loop: &'a mut SlateLoop,
+    /// The last live frame that the worker queued.
+    live_queued: &'a mut Option<FrameId>,
+    /// The delays of the live frames.
+    delays: &'a mut Delays,
+    /// The last frame that a buffer took.
+    queued: &'a mut Option<Queued>,
+}
+
+impl Sent<'_> {
+    /// Queues the frame `next` on `sink`. After an error with a slate or a live
+    /// frame, queues blank and returns the error.
+    fn send(&mut self, sink: &mut impl Sink, next: Next<'_>) -> io::Result<()> {
+        match next {
+            Next::Nothing => Ok(()),
+            Next::Blank => self.blank(sink).map(drop),
+            Next::Slate(name) => match self.slates.get(name) {
+                Ok(slate) => {
+                    let frame = slate.frame(self.slate_loop.index(slate.id()));
+                    match queue(sink, frame, Shown::Slate(name), self.lease, self.queued) {
+                        Ok(true) => {
+                            self.slate_loop.advance(slate.len());
+                            Ok(())
+                        }
+                        Ok(false) => Ok(()),
+                        Err(error) => self.blank(sink).and(Err(error)),
+                    }
+                }
+                Err(_) => self.blank(sink).map(drop),
+            },
+            Next::Live(live) => match queue(sink, live.frame, Shown::Live, self.lease, self.queued)
+            {
+                Ok(false) => Ok(()),
+                Ok(true) => {
+                    *self.live_queued = Some(live.frame.id);
+                    self.delays.record(live.times, v4l2::monotonic_now());
+                    Ok(())
+                }
+                Err(error) => {
+                    *self.live_queued = Some(live.frame.id);
+                    self.blank(sink).and(Err(error))
+                }
+            },
+        }
+    }
+
+    /// Queues the blank frame on `sink`.
+    fn blank(&mut self, sink: &mut impl Sink) -> io::Result<bool> {
+        queue(sink, BLANK, Shown::Blank, self.lease, self.queued)
     }
 }
 
@@ -613,6 +696,7 @@ fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::varlink::{Granted, Kind};
 
     #[test]
     fn blank_frame_is_a_baseline_jpeg_of_the_gadget_size() {
@@ -826,6 +910,319 @@ mod tests {
         let index = slate_loop.index(AWAY);
 
         assert_eq!(index, 1);
+    }
+
+    /// A sink that returns each result of `results` in order.
+    struct FakeSink {
+        results: Vec<io::Result<bool>>,
+    }
+
+    impl Sink for FakeSink {
+        fn queue(&mut self, _frame: Frame<'_>) -> io::Result<bool> {
+            self.results.remove(0)
+        }
+    }
+
+    /// Returns a sink that takes each frame.
+    fn free_sink() -> FakeSink {
+        FakeSink {
+            results: vec![Ok(true)],
+        }
+    }
+
+    /// The state of the worker in the `send` tests.
+    #[derive(Default)]
+    struct State {
+        slates: Slates,
+        slate_loop: SlateLoop,
+        live_queued: Option<FrameId>,
+        delays: Delays,
+        lease: Option<choice::Lease>,
+        queued: Option<Queued>,
+    }
+
+    impl State {
+        fn with_slates(slates: Slates) -> Self {
+            Self {
+                slates,
+                ..Self::default()
+            }
+        }
+
+        fn sent(&mut self) -> Sent<'_> {
+            Sent {
+                lease: self.lease.as_ref(),
+                slates: &self.slates,
+                slate_loop: &mut self.slate_loop,
+                live_queued: &mut self.live_queued,
+                delays: &mut self.delays,
+                queued: &mut self.queued,
+            }
+        }
+    }
+
+    #[test]
+    fn queued_blank_is_recorded_as_blank() {
+        let mut state = State::default();
+
+        state.sent().send(&mut free_sink(), Next::Blank).unwrap();
+
+        assert_eq!(state.queued.map(|queued| queued.kind), Some(Kind::Blank));
+    }
+
+    #[test]
+    fn queued_slate_is_recorded_with_its_name() {
+        let mut state = State::with_slates(Slates::with_slate(
+            "away",
+            include_bytes!("../assets/slates/away.jpg"),
+        ));
+
+        state
+            .sent()
+            .send(&mut free_sink(), Next::Slate("away"))
+            .unwrap();
+
+        assert_eq!(
+            state.queued.map(|queued| queued.kind),
+            Some(Kind::Slate("away".to_owned()))
+        );
+    }
+
+    #[test]
+    fn queued_live_frame_is_recorded_as_live() {
+        let mut state = State::default();
+
+        state
+            .sent()
+            .send(&mut free_sink(), Next::Live(live_frame(2, NOW)))
+            .unwrap();
+
+        assert_eq!(state.queued.map(|queued| queued.kind), Some(Kind::Live));
+    }
+
+    #[test]
+    fn queued_live_frame_records_the_grant_of_its_lease() {
+        let mut state = State {
+            lease: Some(choice::Lease {
+                grant: choice::Grant {
+                    session: Duration::from_secs(1),
+                    epoch: 3,
+                },
+                permission: choice::Permission::Live,
+                until: Duration::from_secs(101),
+            }),
+            ..State::default()
+        };
+
+        state
+            .sent()
+            .send(&mut free_sink(), Next::Live(live_frame(2, NOW)))
+            .unwrap();
+
+        assert_eq!(
+            state.queued,
+            Some(Queued {
+                kind: Kind::Live,
+                grant: Some(Granted {
+                    grant: choice::Grant {
+                        session: Duration::from_secs(1),
+                        epoch: 3,
+                    },
+                    permission: choice::Permission::Live,
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn queued_blank_without_a_lease_records_no_grant() {
+        let mut state = State {
+            lease: None,
+            ..State::default()
+        };
+
+        state.sent().send(&mut free_sink(), Next::Blank).unwrap();
+
+        assert_eq!(
+            state.queued,
+            Some(Queued {
+                kind: Kind::Blank,
+                grant: None,
+            })
+        );
+    }
+
+    #[test]
+    fn queued_blank_under_a_new_grant_records_the_new_grant() {
+        let mut state = State {
+            lease: Some(choice::Lease {
+                grant: choice::Grant {
+                    session: Duration::from_secs(1),
+                    epoch: 4,
+                },
+                permission: choice::Permission::Blank,
+                until: Duration::from_secs(101),
+            }),
+            queued: Some(Queued {
+                kind: Kind::Blank,
+                grant: Some(Granted {
+                    grant: choice::Grant {
+                        session: Duration::from_secs(1),
+                        epoch: 3,
+                    },
+                    permission: choice::Permission::Blank,
+                }),
+            }),
+            ..State::default()
+        };
+
+        state.sent().send(&mut free_sink(), Next::Blank).unwrap();
+
+        assert_eq!(
+            state.queued,
+            Some(Queued {
+                kind: Kind::Blank,
+                grant: Some(Granted {
+                    grant: choice::Grant {
+                        session: Duration::from_secs(1),
+                        epoch: 4,
+                    },
+                    permission: choice::Permission::Blank,
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn repeated_slate_frame_records_the_slate_and_its_grant() {
+        let mut state = State {
+            lease: Some(choice::Lease {
+                grant: choice::Grant {
+                    session: Duration::from_secs(1),
+                    epoch: 3,
+                },
+                permission: choice::Permission::Slate("away".to_owned()),
+                until: Duration::from_secs(101),
+            }),
+            ..State::with_slates(Slates::with_slate(
+                "away",
+                include_bytes!("../assets/slates/away.jpg"),
+            ))
+        };
+        let mut sink = FakeSink {
+            results: vec![Ok(true), Ok(true)],
+        };
+        state.sent().send(&mut sink, Next::Slate("away")).unwrap();
+
+        state.sent().send(&mut sink, Next::Slate("away")).unwrap();
+
+        assert_eq!(
+            state.queued,
+            Some(Queued {
+                kind: Kind::Slate("away".to_owned()),
+                grant: Some(Granted {
+                    grant: choice::Grant {
+                        session: Duration::from_secs(1),
+                        epoch: 3,
+                    },
+                    permission: choice::Permission::Slate("away".to_owned()),
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn nothing_keeps_the_last_queued_kind() {
+        let mut state = State {
+            queued: Some(Queued {
+                kind: Kind::Live,
+                grant: None,
+            }),
+            ..State::default()
+        };
+        let mut sink = FakeSink { results: vec![] };
+
+        state.sent().send(&mut sink, Next::Nothing).unwrap();
+
+        assert_eq!(state.queued.map(|queued| queued.kind), Some(Kind::Live));
+    }
+
+    #[test]
+    fn live_frame_without_a_free_buffer_keeps_the_last_queued_kind() {
+        let mut state = State {
+            queued: Some(Queued {
+                kind: Kind::Blank,
+                grant: None,
+            }),
+            ..State::default()
+        };
+        let mut sink = FakeSink {
+            results: vec![Ok(false)],
+        };
+
+        state
+            .sent()
+            .send(&mut sink, Next::Live(live_frame(2, NOW)))
+            .unwrap();
+
+        assert_eq!(state.queued.map(|queued| queued.kind), Some(Kind::Blank));
+    }
+
+    #[test]
+    fn failed_live_frame_with_a_queued_blank_is_recorded_as_blank() {
+        let mut state = State {
+            queued: Some(Queued {
+                kind: Kind::Live,
+                grant: None,
+            }),
+            ..State::default()
+        };
+        let mut sink = FakeSink {
+            results: vec![Err(io::Error::other("no device")), Ok(true)],
+        };
+
+        let _ = state.sent().send(&mut sink, Next::Live(live_frame(2, NOW)));
+
+        assert_eq!(state.queued.map(|queued| queued.kind), Some(Kind::Blank));
+    }
+
+    #[test]
+    fn failed_live_frame_returns_its_error() {
+        let mut state = State::default();
+        let mut sink = FakeSink {
+            results: vec![Err(io::Error::other("no device")), Ok(true)],
+        };
+
+        let result = state.sent().send(&mut sink, Next::Live(live_frame(2, NOW)));
+
+        assert_eq!(result.unwrap_err().to_string(), "no device");
+    }
+
+    #[test]
+    fn failed_slate_with_a_queued_blank_is_recorded_as_blank() {
+        let mut state = State::with_slates(Slates::with_slate(
+            "away",
+            include_bytes!("../assets/slates/away.jpg"),
+        ));
+        let mut sink = FakeSink {
+            results: vec![Err(io::Error::other("no device")), Ok(true)],
+        };
+
+        let _ = state.sent().send(&mut sink, Next::Slate("away"));
+
+        assert_eq!(state.queued.map(|queued| queued.kind), Some(Kind::Blank));
+    }
+
+    #[test]
+    fn unknown_slate_is_recorded_as_blank() {
+        let mut state = State::default();
+
+        state
+            .sent()
+            .send(&mut free_sink(), Next::Slate("away"))
+            .unwrap();
+
+        assert_eq!(state.queued.map(|queued| queued.kind), Some(Kind::Blank));
     }
 
     #[test]

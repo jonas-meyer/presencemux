@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use presencemux_api::cam::{self as api, CamProxy};
-use presencemux_core::{CamPermission, CamReport, Epoch};
+use presencemux_core::{CamOutput, CamPermission, CamReport, Epoch, Granted, OnAir, SlateId};
 use zlink::Connection;
 
 use crate::adapter::{Adapter, AdapterError, FIRST_WAIT, Latch, LatchReason, MAX_WAIT, Reply};
@@ -67,8 +67,9 @@ impl Cam {
     }
 
     /// Returns the reply of the cam worker in the types of the daemon. Keeps
-    /// only a latch in the session of the last lease, the session of this
-    /// daemon. Returns an error for a latch with an epoch out of range.
+    /// only a latch and a grant in the session of the last lease, the session
+    /// of this daemon. Returns an error for an epoch out of range, or for a
+    /// granted slate name without a slate id.
     fn reply(&self, report: &api::Report) -> Result<Reply<CamReport>, AdapterError> {
         let latch = report
             .latched
@@ -82,32 +83,71 @@ impl Cam {
                 })
             })
             .transpose()?;
+        let applied = report
+            .applied
+            .as_ref()
+            .filter(|grant| grant.session_usec == self.session)
+            .map(|grant| {
+                let epoch = u32::try_from(grant.epoch)
+                    .map_err(|_| AdapterError::Invalid("applied epoch"))?;
+                Ok(Granted {
+                    permission: self.permission(grant.permission, grant.slate.as_deref())?,
+                    epoch: Epoch::new(epoch),
+                })
+            })
+            .transpose()?;
+        let output = match report.output {
+            api::Output::Nothing => CamOutput::Nothing,
+            api::Output::Blank => CamOutput::Blank,
+            api::Output::Live => CamOutput::Live,
+            api::Output::Slate => CamOutput::Slate(
+                report
+                    .slate
+                    .as_deref()
+                    .and_then(|name| self.config.slates.id(name)),
+            ),
+        };
         Ok(Reply {
             report: CamReport {
                 worker: report.worker.into(),
                 camera: report.camera.into(),
                 stream: report.host.into(),
                 latched: latch.map(|latch| latch.epoch),
+                output,
+                exceeded: exceeded(report),
+                applied,
             },
             latch,
+            message: message(report),
         })
+    }
+
+    /// Returns `permission` with the slate `slate` in the types of core.
+    fn permission(
+        &self,
+        permission: api::Permission,
+        slate: Option<&str>,
+    ) -> Result<CamPermission, AdapterError> {
+        Ok(match permission {
+            api::Permission::Blank => CamPermission::Blank,
+            api::Permission::Live => CamPermission::Live,
+            api::Permission::Slate => CamPermission::Slate(self.slate_id(slate)?),
+        })
+    }
+
+    /// Returns the id of the slate `name`, or an error without a name or an id.
+    fn slate_id(&self, name: Option<&str>) -> Result<SlateId, AdapterError> {
+        name.and_then(|name| self.config.slates.id(name))
+            .ok_or(AdapterError::Invalid("slate"))
     }
 
     /// Logs the rejection of `report`, or else its detail, if the message
     /// differs from the last one.
     fn log(&mut self, report: &api::Report) {
-        let message = report
-            .rejected
-            .map(|rejection| format!("the cam worker rejected the lease: {rejection}"))
-            .or_else(|| {
-                report
-                    .detail
-                    .as_ref()
-                    .map(|detail| format!("the cam worker reports: {detail}"))
-            });
+        let message = message(report);
         if message != self.last_message {
             if let Some(message) = &message {
-                tracing::warn!("{message}");
+                tracing::warn!("the cam worker: {message}");
             }
             self.last_message = message;
         }
@@ -147,6 +187,34 @@ impl Adapter for Cam {
     fn reset(&mut self) {
         self.connection = None;
     }
+}
+
+/// Returns the rejection of `report`, or else its detail.
+fn message(report: &api::Report) -> Option<String> {
+    report
+        .rejected
+        .map(|rejection| format!("rejected the lease: {rejection}"))
+        .or_else(|| report.detail.clone())
+}
+
+/// Returns whether the output of `report` is above the grant under which the
+/// cam worker queued it. Without a grant, any output above blank exceeds it.
+fn exceeded(report: &api::Report) -> bool {
+    let output = match report.output {
+        api::Output::Nothing | api::Output::Blank => OnAir::Off,
+        api::Output::Slate => OnAir::Canned,
+        api::Output::Live => OnAir::Live,
+    };
+    let permitted =
+        report
+            .output_grant
+            .as_ref()
+            .map_or(OnAir::Off, |grant| match grant.permission {
+                api::Permission::Blank => OnAir::Off,
+                api::Permission::Slate => OnAir::Canned,
+                api::Permission::Live => OnAir::Live,
+            });
+    output > permitted
 }
 
 /// Returns a failed connection or call as an adapter error.
@@ -225,7 +293,8 @@ mod tests {
             api::Latch,
             api::LatchReason,
             api::Rejection,
-            api::Shown,
+            api::Output,
+            api::Grant,
             api::HostStream
         ]
     )]
@@ -260,7 +329,10 @@ mod tests {
             camera: api::DeviceStatus::Ready,
             latched: None,
             rejected: None,
-            shown: api::Shown::Blank,
+            output: api::Output::Blank,
+            slate: None,
+            output_grant: None,
+            applied: None,
             host: api::HostStream::Idle,
             detail: None,
         }
@@ -373,6 +445,67 @@ mod tests {
         let reply = cam.exchange(leased(CamPermission::Blank, 0)).await.unwrap();
 
         assert_eq!(reply.report.stream, CamStream::Streaming);
+    }
+
+    /// Returns a grant of epoch 2 in this session with `permission`, and the
+    /// slate `away` for a slate permission.
+    fn grant(permission: api::Permission) -> api::Grant {
+        api::Grant {
+            session_usec: SESSION_USEC,
+            epoch: 2,
+            permission,
+            slate: (permission == api::Permission::Slate).then(|| "away".to_owned()),
+        }
+    }
+
+    #[test]
+    fn live_output_under_its_own_grant_after_a_downgrade_does_not_exceed_it() {
+        let report = api::Report {
+            output: api::Output::Live,
+            output_grant: Some(grant(api::Permission::Live)),
+            applied: Some(grant(api::Permission::Slate)),
+            ..report()
+        };
+
+        assert!(!exceeded(&report));
+    }
+
+    #[test]
+    fn live_output_under_a_slate_grant_exceeds_it() {
+        let report = api::Report {
+            output: api::Output::Live,
+            output_grant: Some(grant(api::Permission::Slate)),
+            ..report()
+        };
+
+        assert!(exceeded(&report));
+    }
+
+    #[test]
+    fn slate_output_without_a_grant_exceeds_it() {
+        let report = api::Report {
+            output: api::Output::Slate,
+            slate: Some("away".to_owned()),
+            output_grant: None,
+            ..report()
+        };
+
+        assert!(exceeded(&report));
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn output_slate_without_a_slate_id_gives_a_slate_without_an_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let reply = api::Report {
+            output: api::Output::Slate,
+            slate: Some("gone".to_owned()),
+            ..report()
+        };
+        let (mut cam, _worker) = start(&dir, "", vec![Reply::Report(reply)]);
+
+        let reply = cam.exchange(leased(CamPermission::Blank, 0)).await.unwrap();
+
+        assert_eq!(reply.report.output, CamOutput::Slate(None));
     }
 
     /// Returns a report of the worker with a stalled latch at epoch 2 in

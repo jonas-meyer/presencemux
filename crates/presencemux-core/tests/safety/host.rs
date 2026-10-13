@@ -1,7 +1,7 @@
 use presencemux_core::{Cause, HostStatus, Observation, OnAir, PlaneId};
 use proptest::prelude::*;
 
-use crate::support::{after, cause_after_lowering, events, not_connected, observations};
+use crate::support::{after, events, hold_after_lowering, not_connected, observations};
 
 proptest! {
     #[test]
@@ -17,16 +17,16 @@ proptest! {
         let _ = controller.handle_input(Observation::Host(left).into());
 
         for plane in PlaneId::ALL {
-            prop_assert_eq!(controller.plane(plane).requested, OnAir::Off);
+            prop_assert_eq!(controller.plane(plane).granted, OnAir::Off);
             prop_assert_eq!(
-                controller.plane(plane).cause,
-                cause_after_lowering(before.plane(plane), Cause::Host(left))
+                controller.plane(plane).hold,
+                hold_after_lowering(before.plane(plane), Cause::Host(left))
             );
         }
         for observation in later {
             let _ = controller.handle_input(observation.into());
             for plane in PlaneId::ALL {
-                prop_assert_eq!(controller.plane(plane).on_air, OnAir::Off);
+                prop_assert_eq!(controller.plane(plane).granted, OnAir::Off);
             }
         }
     }

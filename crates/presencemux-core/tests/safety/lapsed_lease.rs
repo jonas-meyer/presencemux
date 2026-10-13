@@ -2,7 +2,7 @@ use presencemux_core::{Cause, Command, Effects, Epoch, Observation, OnAir, Plane
 use proptest::prelude::*;
 
 use crate::support::{
-    after, cause_after_lowering, events, latched_report, observations, plane, preset_setting,
+    after, events, hold_after_lowering, latched_report, observations, plane, preset_setting,
     preset_without, ready_report,
 };
 
@@ -15,10 +15,10 @@ proptest! {
 
         let _ = controller.handle_input(Observation::LeaseExpired(lapsed, epoch).into());
 
-        prop_assert_eq!(controller.plane(lapsed).requested, OnAir::Off);
+        prop_assert_eq!(controller.plane(lapsed).granted, OnAir::Off);
         prop_assert_eq!(
-            controller.plane(lapsed).cause,
-            cause_after_lowering(before.plane(lapsed), Cause::ControllerStalled)
+            controller.plane(lapsed).hold,
+            hold_after_lowering(before.plane(lapsed), Cause::ControllerStalled)
         );
         for other in PlaneId::ALL.into_iter().filter(|&p| p != lapsed) {
             prop_assert_eq!(controller.plane(other), before.plane(other));
@@ -31,7 +31,7 @@ proptest! {
 
         let _ = controller.handle_input(Observation::LeaseExpired(lapsed, Epoch::new(u32::MAX)).into());
 
-        prop_assert_eq!(controller.plane(lapsed).requested, OnAir::Off);
+        prop_assert_eq!(controller.plane(lapsed).granted, OnAir::Off);
     }
 
     #[test]
@@ -46,7 +46,7 @@ proptest! {
 
         for observation in later {
             let _ = controller.handle_input(observation.into());
-            prop_assert_eq!(controller.plane(lapsed).on_air, OnAir::Off);
+            prop_assert_eq!(controller.plane(lapsed).granted, OnAir::Off);
         }
     }
 
@@ -77,7 +77,7 @@ proptest! {
 
         let _ = controller.handle_input(Observation::LeaseExpired(lapsed, old).into());
 
-        prop_assert_eq!(controller.plane(lapsed).requested, OnAir::Off);
+        prop_assert_eq!(controller.plane(lapsed).granted, OnAir::Off);
     }
 
     #[test]
@@ -92,10 +92,10 @@ proptest! {
 
         let _ = controller.handle_input(latched_report(lapsed, epoch).into());
 
-        prop_assert_eq!(controller.plane(lapsed).requested, OnAir::Off);
+        prop_assert_eq!(controller.plane(lapsed).granted, OnAir::Off);
         prop_assert_eq!(
-            controller.plane(lapsed).cause,
-            cause_after_lowering(before.plane(lapsed), Cause::ControllerStalled)
+            controller.plane(lapsed).hold,
+            hold_after_lowering(before.plane(lapsed), Cause::ControllerStalled)
         );
         for other in PlaneId::ALL.into_iter().filter(|&p| p != lapsed) {
             prop_assert_eq!(controller.plane(other), before.plane(other));

@@ -54,8 +54,44 @@ pub struct Report {
     /// lease and in `Describe`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejected: Option<Rejection>,
-    /// Whether the gate passes audio now.
-    pub open: bool,
+    /// The audio that the gate sends to the gadget, from the last cycle of
+    /// its real-time thread.
+    pub output: Output,
+    /// The grant of the lease under which the gate wrote the cycle of
+    /// `output`. Null for a cycle without a valid lease.
+    #[serde(rename = "outputGrant", skip_serializing_if = "Option::is_none")]
+    #[zlink(rename = "outputGrant")]
+    pub output_grant: Option<Grant>,
+    /// The grant of the lease that the gate applies. Null without a valid
+    /// lease.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied: Option<Grant>,
+}
+
+/// The audio that the gate sends to the gadget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
+#[serde(rename_all = "snake_case")]
+#[zlink(rename_all = "snake_case")]
+pub enum Output {
+    /// Digital silence, or no cycle in the last 100 ms.
+    Silent,
+    /// Audio with a falling gain, after a lease that closes the gate.
+    Closing,
+    /// Audio with a gain above 0 while the gate opens or is open.
+    Passing,
+}
+
+/// The grant of a lease: the session, the epoch and the permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
+#[serde(rename_all = "camelCase")]
+#[zlink(rename_all = "camelCase")]
+pub struct Grant {
+    /// The start time of the daemon run that sent the lease.
+    #[serde(rename = "sessionUSec")]
+    #[zlink(rename = "sessionUSec")]
+    pub session_usec: i64,
+    pub epoch: i64,
+    pub permission: Permission,
 }
 
 /// The state of the gate or the audio interface.

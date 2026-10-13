@@ -1,7 +1,7 @@
 use presencemux_core::{Controller, PlaneId};
 use proptest::prelude::*;
 
-use crate::support::events;
+use crate::support::{events, held_level};
 
 proptest! {
     /// The policy snapshot covers the rule that a live plane needs ready
@@ -14,7 +14,7 @@ proptest! {
             let _ = controller.handle_input(event);
             for plane in PlaneId::ALL {
                 let state = controller.plane(plane);
-                prop_assert!(state.on_air <= state.requested, "{plane:?} after {event:?}");
+                prop_assert!(state.granted <= held_level(state), "{plane:?} after {event:?}");
             }
         }
     }

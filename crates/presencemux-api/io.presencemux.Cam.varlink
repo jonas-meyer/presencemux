@@ -20,8 +20,14 @@ worker: DeviceStatus, #  The state of the camera.
 camera: DeviceStatus, #  The latch, if the cam worker is latched.
 latched: ?Latch, #  Why the cam worker rejected the lease of this call. Null after an
 #  accepted lease and in `Describe`.
-rejected: ?Rejection, #  The frame that the cam worker sends.
-shown: Shown, #  Whether the host receives a stream.
+rejected: ?Rejection, #  The frames that the host gets. `nothing` means no stream. Otherwise it is
+#  the kind of the last frame that the cam worker queued.
+output: Output, #  The name of the slate in `output`. Only a `slate` output has a name.
+slate: ?string, #  The grant of the lease under which the cam worker queued the frame of
+#  `output`. Null for `nothing`, or for a frame without a valid lease.
+outputGrant: ?Grant, #  The grant of the lease that the cam worker applies. Null without a
+#  valid lease.
+applied: ?Grant, #  Whether the host receives a stream.
 host: HostStream, #  A message for the logs, for example about an unknown slate.
 detail: ?string)
 
@@ -55,8 +61,19 @@ type Rejection (
 	old_epoch
 )
 
-#  The frame that the cam worker sends.
-type Shown (blank, slate, live)
+#  The frames that the host gets.
+type Output (
+	#  The host receives no stream.
+	nothing,
+	blank,
+	slate,
+	live
+)
+
+#  The grant of a lease: the session, the epoch and the permission.
+type Grant (#  The start time of the daemon run that sent the lease.
+sessionUSec: int, epoch: int, permission: Permission, #  The name of the slate. Only a `slate` permission has a name.
+slate: ?string)
 
 #  Whether the host receives a stream.
 type HostStream (idle, streaming)
