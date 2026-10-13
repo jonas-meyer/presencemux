@@ -5,8 +5,9 @@
 use std::fmt;
 use std::time::Duration;
 
-/// The longest time from now to the expiry time of a lease.
-const MAX_LEASE: Duration = Duration::from_secs(2);
+use presencemux_lease::LeaseHolder;
+pub(crate) use presencemux_lease::{Grant, Rejection};
+
 /// The largest age of a live frame that the worker sends. A live lease without
 /// such a frame for this time latches the worker.
 const FRESH: Duration = Duration::from_millis(500);
@@ -20,24 +21,11 @@ pub(crate) enum Permission {
     Live,
 }
 
-/// The session and the epoch of a lease. The order of grants is by session,
-/// then by epoch. The order of the fields gives this order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct Grant {
-    /// The start time of the daemon run that sent the lease.
-    pub(crate) session: Duration,
-    /// The number of the user command that gave the permission.
-    pub(crate) epoch: u32,
-}
-
 /// A permission from presencemuxd that expires at a fixed time.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Lease {
-    pub(crate) grant: Grant,
-    pub(crate) permission: Permission,
-    /// The time at which the lease expires.
-    pub(crate) until: Duration,
-}
+pub(crate) type Lease = presencemux_lease::Lease<Permission>;
+
+/// A block of live video until a lease with a newer grant arrives.
+pub(crate) type Latch = presencemux_lease::Latch<Reason>;
 
 /// The reason for a latch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -50,44 +38,17 @@ pub(crate) enum Reason {
     Started,
 }
 
+impl presencemux_lease::LatchReason for Reason {
+    const EXPIRED: Self = Self::Expired;
+    const STARTED: Self = Self::Started;
+}
+
 impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Expired => "expired",
             Self::Stalled => "stalled",
             Self::Started => "started",
-        })
-    }
-}
-
-/// A block of live video until a lease with a newer grant arrives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct Latch {
-    /// The grant of the lease at the time of the latch.
-    pub(crate) grant: Grant,
-    pub(crate) reason: Reason,
-}
-
-/// The reason for the rejection of a lease.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Rejection {
-    /// The lease expires at or before now.
-    Late,
-    /// The lease expires more than [`MAX_LEASE`] after now.
-    TooLong,
-    /// The lease comes from an older daemon run than the last lease.
-    OldSession,
-    /// The lease has an older epoch than the last lease of its session.
-    OldEpoch,
-}
-
-impl fmt::Display for Rejection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Late => "late",
-            Self::TooLong => "too long",
-            Self::OldSession => "old session",
-            Self::OldEpoch => "old epoch",
         })
     }
 }
@@ -104,71 +65,38 @@ pub(crate) enum Shown<'a> {
 /// The lease and the latch of the worker.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Choice {
-    /// The last accepted lease. It stays after it expires. `renew` compares
-    /// each new lease with it.
-    last: Option<Lease>,
-    /// Whether the last lease expired.
-    expired: bool,
+    holder: LeaseHolder<Permission, Reason>,
     /// The start time of the live permission of the current grant.
     live_since: Option<Duration>,
-    latch: Option<Latch>,
 }
 
 impl Choice {
     /// Returns the latch, if the worker is latched.
     pub(crate) fn latch(&self) -> Option<Latch> {
-        self.latch
+        self.holder.latch()
     }
 
     /// Returns the last accepted lease, if it does not expire at or before
     /// `now`.
     pub(crate) fn lease(&self, now: Duration) -> Option<&Lease> {
-        self.last
-            .as_ref()
-            .filter(|lease| !self.expired && lease.until > now)
+        self.holder.lease(now)
     }
 
     /// Checks `lease` at the time `now`, and accepts it or returns the
     /// rejection. If the last lease expired at or before `now`, latches the
     /// worker first.
     pub(crate) fn renew(&mut self, lease: Lease, now: Duration) -> Result<(), Rejection> {
-        self.expire(now);
-        if lease.until <= now {
-            return Err(Rejection::Late);
-        }
-        if now
-            .checked_add(MAX_LEASE)
-            .is_some_and(|max| lease.until > max)
-        {
-            return Err(Rejection::TooLong);
-        }
-        match &self.last {
-            Some(last) if lease.grant.session < last.grant.session => {
-                return Err(Rejection::OldSession);
-            }
-            Some(last) if lease.grant < last.grant => return Err(Rejection::OldEpoch),
-            Some(_) => {}
-            None => {
-                self.latch = Some(Latch {
-                    grant: lease.grant,
-                    reason: Reason::Started,
-                });
-            }
-        }
-        if self.latch.is_some_and(|latch| lease.grant > latch.grant) {
-            self.latch = None;
-        }
         let new_live = self
-            .last
-            .as_ref()
+            .holder
+            .last()
             .is_none_or(|last| last.grant != lease.grant || last.permission != Permission::Live);
-        if lease.permission != Permission::Live {
+        let live = lease.permission == Permission::Live;
+        self.holder.renew(lease, now)?;
+        if !live {
             self.live_since = None;
         } else if new_live {
             self.live_since = Some(now);
         }
-        self.last = Some(lease);
-        self.expired = false;
         Ok(())
     }
 
@@ -177,46 +105,24 @@ impl Choice {
     /// lease expired, or if a live lease had no fresh frame for [`FRESH`].
     /// Returns the new latch, if the worker latched now.
     pub(crate) fn check(&mut self, now: Duration, newest: Option<Duration>) -> Option<Latch> {
-        if self.expire(now) {
-            return self.latch;
+        if let Some(latch) = self.holder.expire(now) {
+            return Some(latch);
         }
-        let lease = self.lease(now)?;
+        let lease = self.holder.lease(now)?;
         let stalled = lease.permission == Permission::Live
-            && self.latch.is_none()
+            && self.holder.latch().is_none()
             && !is_fresh(now, newest.max(self.live_since));
         if !stalled {
             return None;
         }
-        self.latch = Some(Latch {
-            grant: lease.grant,
-            reason: Reason::Stalled,
-        });
-        self.latch
+        self.holder.latch_now(Reason::Stalled)
     }
 
     /// Returns the frame at the time `now`. `newest` is the capture time of the
     /// newest camera frame.
     pub(crate) fn shown(&self, now: Duration, newest: Option<Duration>) -> Shown<'_> {
         let permission = self.lease(now).map(|lease| &lease.permission);
-        decide(permission, self.latch.is_some(), is_fresh(now, newest))
-    }
-
-    /// Latches the worker if the last lease expires at or before `now`. The
-    /// expiry replaces the reason of an earlier latch. Returns whether the
-    /// lease expired now.
-    fn expire(&mut self, now: Duration) -> bool {
-        let Some(last) = &self.last else {
-            return false;
-        };
-        if self.expired || last.until > now {
-            return false;
-        }
-        self.expired = true;
-        self.latch = Some(Latch {
-            grant: last.grant,
-            reason: Reason::Expired,
-        });
-        true
+        decide(permission, self.latch().is_some(), is_fresh(now, newest))
     }
 }
 
@@ -243,6 +149,8 @@ mod tests {
     use std::fmt::Write as _;
 
     use proptest::prelude::*;
+
+    use presencemux_lease::MAX_LEASE;
 
     use super::*;
 
@@ -787,7 +695,7 @@ mod tests {
         /// Applies the event to `choice` at `now`, and returns the result as
         /// text.
         fn apply(self, choice: &mut Choice, now: Duration) -> String {
-            let epoch = choice.last.as_ref().map_or(0, |last| last.grant.epoch);
+            let epoch = choice.holder.last().map_or(0, |last| last.grant.epoch);
             let renewal = |grant| Lease {
                 grant,
                 permission: Permission::Live,

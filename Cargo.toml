@@ -12,6 +12,7 @@ publish = false
 presencemux-api = { path = "crates/presencemux-api" }
 presencemux-core = { path = "crates/presencemux-core" }
 presencemux-jpeg = { path = "crates/presencemux-jpeg" }
+presencemux-lease = { path = "crates/presencemux-lease" }
 clap = { version = "4.6", features = ["derive"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 expect-test = "1.5"

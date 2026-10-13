@@ -1,0 +1,12 @@
+[package]
+name = "presencemux-lease"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

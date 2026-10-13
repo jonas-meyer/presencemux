@@ -68,7 +68,7 @@ impl Control {
                 epoch: i64::from(latch.grant.epoch),
                 reason: latch.reason.into(),
             }),
-            rejected: rejected.map(Rejection::from),
+            rejected: rejected.map(rejection_to_wire),
             shown,
             host: if self.streaming {
                 HostStream::Streaming
@@ -101,14 +101,13 @@ impl From<choice::Reason> for LatchReason {
     }
 }
 
-impl From<choice::Rejection> for Rejection {
-    fn from(rejection: choice::Rejection) -> Self {
-        match rejection {
-            choice::Rejection::Late => Self::Late,
-            choice::Rejection::TooLong => Self::TooLong,
-            choice::Rejection::OldSession => Self::OldSession,
-            choice::Rejection::OldEpoch => Self::OldEpoch,
-        }
+/// Returns `rejection` in the wire types.
+fn rejection_to_wire(rejection: choice::Rejection) -> Rejection {
+    match rejection {
+        choice::Rejection::Late => Rejection::Late,
+        choice::Rejection::TooLong => Rejection::TooLong,
+        choice::Rejection::OldSession => Rejection::OldSession,
+        choice::Rejection::OldEpoch => Rejection::OldEpoch,
     }
 }
 

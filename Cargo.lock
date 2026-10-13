@@ -764,6 +764,7 @@ dependencies = [
  "insta",
  "presencemux-api",
  "presencemux-jpeg",
+ "presencemux-lease",
  "proptest",
  "rustix",
  "sd-notify",
@@ -806,6 +807,13 @@ dependencies = [
  "proptest",
  "thiserror",
  "zerocopy",
+]
+
+[[package]]
+name = "presencemux-lease"
+version = "0.1.0"
+dependencies = [
+ "proptest",
 ]
 
 [[package]]

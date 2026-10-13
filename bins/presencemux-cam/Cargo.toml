@@ -28,6 +28,7 @@ systemd-units = { enable = true, start = true }
 [dependencies]
 presencemux-api.workspace = true
 presencemux-jpeg.workspace = true
+presencemux-lease.workspace = true
 rustix = { workspace = true, features = ["event", "fs", "mm", "time"] }
 sd-notify = { workspace = true, features = ["fdstore"] }
 serde.workspace = true
