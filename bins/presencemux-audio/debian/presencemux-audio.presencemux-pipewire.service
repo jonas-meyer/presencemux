@@ -16,7 +16,6 @@ Restart=always
 RestartSec=1s
 AmbientCapabilities=CAP_SYS_NICE
 CapabilityBoundingSet=CAP_SYS_NICE
-LimitRTPRIO=95
 
 LockPersonality=yes
 MemoryDenyWriteExecute=yes

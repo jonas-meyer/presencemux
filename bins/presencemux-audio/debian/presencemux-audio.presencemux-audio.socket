@@ -1,0 +1,13 @@
+[Unit]
+Description=PresenceMux audio worker socket
+Documentation=https://github.com/jonas-meyer/presencemux
+
+[Socket]
+ListenStream=/run/presencemux/io.presencemux.Audio
+FileDescriptorName=varlink
+SocketUser=_presencemux-audio
+SocketGroup=_presencemux
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target

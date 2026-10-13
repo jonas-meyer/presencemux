@@ -1,0 +1,59 @@
+#  Lets the mic gate pass audio to the host, or closes it.
+interface io.presencemux.Audio
+
+#  A permission for the mic gate that expires at a fixed time. Times are
+#  `CLOCK_MONOTONIC` in microseconds.
+type Lease (#  The start time of the daemon run that sends the lease.
+sessionUSec: int, #  The number of the user command that gave the permission.
+epoch: int, permission: Permission, #  The time at which the lease expires.
+untilUSec: int)
+
+#  Whether the gate can pass audio.
+type Permission (denied, permitted)
+
+#  The state of the audio worker, in the reply to each call.
+type Report (#  The state of the gate and its PipeWire streams.
+gate: DeviceStatus, #  The state of the USB audio interface.
+interface: DeviceStatus, #  The latch, if the gate is latched.
+latched: ?Latch, #  Why the gate rejected the lease of this call. Null after an accepted
+#  lease and in `Describe`.
+rejected: ?Rejection, #  Whether the gate passes audio now.
+open: bool)
+
+#  The state of the gate or the audio interface.
+type DeviceStatus (missing, initializing, ready, fault)
+
+#  A block of the mic until a lease with a newer grant arrives.
+type Latch (#  The session of the lease at the time of the latch.
+sessionUSec: int, #  The epoch of the lease at the time of the latch.
+epoch: int, reason: LatchReason)
+
+#  The reason for a latch.
+type LatchReason (
+	#  The lease expired before the next lease arrived.
+	expired,
+	#  The audio worker started. The first lease latches the gate.
+	started
+)
+
+#  The reason for the rejection of a lease.
+type Rejection (
+	#  The lease expires at or before now.
+	late,
+	#  The lease expires more than 2 s after now.
+	too_long,
+	#  The lease comes from an older daemon run than the last lease.
+	old_session,
+	#  The lease has an older epoch than the last lease of its session.
+	old_epoch
+)
+
+#  Accepts or rejects a lease, and returns the report.
+method Renew(lease: Lease) -> (report: Report)
+
+#  Returns the last accepted lease that did not expire, and the report.
+method Describe() -> (#  The last accepted lease. Null if it expired or if no lease arrived.
+lease: ?Lease, report: Report)
+
+#  The lease has a time or an epoch out of range.
+error InvalidLease ()

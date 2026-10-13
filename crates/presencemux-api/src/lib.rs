@@ -1,6 +1,8 @@
-//! The Varlink APIs of presencemuxd and the cam worker. The module [`cam`]
-//! holds the API of the cam worker.
+//! The Varlink APIs of presencemuxd and its workers. The module [`cam`] holds
+//! the API of the cam worker. The module [`audio`] holds the API of the audio
+//! worker.
 
+pub mod audio;
 pub mod cam;
 
 use std::fmt;

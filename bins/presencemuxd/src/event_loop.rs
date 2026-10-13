@@ -47,12 +47,14 @@ impl Monotonic {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Owner {
     CamWorker,
+    AudioWorker,
 }
 
 impl fmt::Display for Owner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::CamWorker => "cam worker",
+            Self::AudioWorker => "audio worker",
         })
     }
 }
@@ -62,6 +64,7 @@ impl Owner {
     pub(crate) const fn devices(self) -> &'static [Device] {
         match self {
             Self::CamWorker => &[Device::Camera, Device::CamWorker],
+            Self::AudioWorker => &[Device::Gate, Device::AudioInterface],
         }
     }
 
@@ -107,13 +110,6 @@ pub(crate) struct Handle(mpsc::Sender<Message>);
 #[derive(Debug)]
 pub(crate) struct Outputs {
     pub(crate) cam: watch::Receiver<Leased<CamPermission>>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "only the tests use this until the gate adapter exists"
-        )
-    )]
     pub(crate) mic: watch::Receiver<Leased<MicPermission>>,
     pub(crate) status: watch::Receiver<Status>,
 }

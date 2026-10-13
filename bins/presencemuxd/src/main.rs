@@ -5,6 +5,7 @@ mod cam;
 mod config;
 mod event_loop;
 mod host;
+mod mic;
 mod status;
 mod systemd;
 mod varlink;
@@ -22,6 +23,7 @@ use tracing_subscriber::prelude::*;
 use crate::cam::Cam;
 use crate::config::Config;
 use crate::event_loop::EventLoop;
+use crate::mic::Mic;
 use crate::varlink::Service;
 
 const CONFIG: &str = "/etc/presencemux/config.toml";
@@ -74,6 +76,12 @@ async fn run() -> Result<(), Error> {
     tasks.spawn_local(async move {
         adapter::drive(outputs.cam, cam, cam_handle).await;
         "cam adapter"
+    });
+    let mic = Mic::new(PathBuf::from(presencemux_api::audio::SOCKET_PATH));
+    let mic_handle = handle.clone();
+    tasks.spawn_local(async move {
+        adapter::drive(outputs.mic, mic, mic_handle).await;
+        "mic adapter"
     });
     let host_handle = handle.clone();
     tasks.spawn_local(async move {

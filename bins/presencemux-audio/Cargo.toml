@@ -14,18 +14,45 @@ extended-description = """\
 presencemux-audio runs PipeWire and WirePlumber as system services for the \
 PresenceMux appliance. It routes the speakers Studio Audio of the USB gadget \
 to the USB audio interface, and masks the user instances of PipeWire and \
-WirePlumber."""
+WirePlumber. Its audio worker is the mic gate. The gate passes the audio \
+interface to the gadget mic Studio Microphone only under a lease from \
+presencemuxd."""
 section = "sound"
-depends = "pipewire (>= 1.4), wireplumber (>= 0.5), systemd (>= 257)"
+depends = "$auto, pipewire (>= 1.4), wireplumber (>= 0.5), systemd (>= 257), presencemuxd"
 maintainer-scripts = "debian/"
 assets = [
+    ["target/release/presencemux-audio", "usr/bin/", "755"],
     ["config/pipewire.conf.d/50-presencemux.conf", "etc/pipewire/pipewire.conf.d/", "644"],
     ["config/wireplumber.conf.d/50-presencemux.conf", "etc/wireplumber/wireplumber.conf.d/", "644"],
 ]
+# cargo-deb reads `debian/<package>.<unit>.<type>` for each unit. Without that
+# file, it reads `debian/<package>.<type>`.
 systemd-units = [
     { unit-name = "presencemux-pipewire", enable = true, start = true },
     { unit-name = "presencemux-wireplumber", enable = true, start = true },
+    { unit-name = "presencemux-audio", enable = true, start = true },
 ]
+
+[dependencies]
+pipewire = { workspace = true, features = ["v1_2_0"] }
+presencemux-api.workspace = true
+presencemux-lease.workspace = true
+rustix = { workspace = true, features = ["fs", "time"] }
+sd-notify.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "sync", "time"] }
+tracing.workspace = true
+tracing-journald.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+zerocopy.workspace = true
+zlink = { workspace = true, features = ["service"] }
+
+[dev-dependencies]
+expect-test.workspace = true
+proptest.workspace = true
+rustix = { workspace = true, features = ["process"] }
+zlink = { workspace = true, features = ["idl-parse", "proxy"] }
 
 [lints]
 workspace = true

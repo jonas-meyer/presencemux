@@ -1,1 +1,2 @@
 u pipewire - "PipeWire system service" /run/pipewire
+u! _presencemux-audio - "PresenceMux audio worker"
