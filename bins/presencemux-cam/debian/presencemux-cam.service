@@ -1,7 +1,8 @@
 [Unit]
 Description=PresenceMux cam worker
 Documentation=https://github.com/jonas-meyer/presencemux
-Wants=modprobe@videodev.service presencemux-cam.socket
+Requires=presencemux-cam.socket
+Wants=modprobe@videodev.service
 After=presencemux-gadget.service modprobe@videodev.service presencemux-cam.socket
 StartLimitIntervalSec=0
 
