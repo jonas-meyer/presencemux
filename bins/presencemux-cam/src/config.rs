@@ -70,7 +70,7 @@ fn parse(text: &str) -> Result<BTreeMap<String, Result<PathBuf, String>>, String
 fn one_line(text: &str, error: &toml::de::Error) -> String {
     match error.span() {
         Some(span) => {
-            let line = text[..span.start].lines().count().max(1);
+            let line = text[..span.start].matches('\n').count() + 1;
             format!("line {line}: {}", error.message())
         }
         None => error.message().to_owned(),
@@ -126,6 +126,16 @@ mod tests {
         assert_eq!(
             error,
             "line 2: string values must be quoted, expected literal string"
+        );
+    }
+
+    #[test]
+    fn error_at_the_start_of_a_line_gives_that_line() {
+        let error = parse("[slates.away]\n= \"away.jpg\"\n").unwrap_err();
+
+        assert_eq!(
+            error,
+            "line 2: unquoted keys cannot be empty, expected letters, numbers, `-`, `_`"
         );
     }
 
