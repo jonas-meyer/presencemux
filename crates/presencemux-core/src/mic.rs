@@ -1,12 +1,14 @@
-use crate::{DeviceStatus, Epoch, Granted, OnAir, Plane, PrivacyPlane};
+use crate::{Device, DeviceStatus, Epoch, Granted, OnAir, Plane, PlaneId, PrivacyPlane, Report};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mic;
 
 impl Plane for Mic {
     type Desired = MicMute;
-    type Observed = MicObserved;
+    type Report = MicReport;
     type Target = Granted<MicPermission>;
+
+    const ID: PlaneId = PlaneId::Mic;
 
     const SAFE: Self::Target = Granted {
         permission: MicPermission::Denied,
@@ -39,11 +41,28 @@ pub enum MicMute {
     Unmuted,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct MicObserved {
-    pub interface: DeviceStatus,
+/// A report of the audio worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MicReport {
     /// The stage of the audio chain that enforces the mic permission.
     pub gate: DeviceStatus,
+    pub interface: DeviceStatus,
+    /// The epoch of the lease at the latch of the gate, if the gate is
+    /// latched.
+    pub latched: Option<Epoch>,
+}
+
+impl Report for MicReport {
+    fn devices(&self) -> [(Device, DeviceStatus); 2] {
+        [
+            (Device::Gate, self.gate),
+            (Device::AudioInterface, self.interface),
+        ]
+    }
+
+    fn latched(&self) -> Option<Epoch> {
+        self.latched
+    }
 }
 
 /// What the audio chain may pass to the host.

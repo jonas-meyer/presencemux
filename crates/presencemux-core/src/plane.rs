@@ -1,15 +1,16 @@
 use core::fmt::Debug;
 
-use crate::{Device, DeviceStatus, HostStatus, OnAir, policy};
+use crate::{Device, HostStatus, OnAir, Report, Reported, policy};
 
 /// An output of the controller, with its own adapter in the daemon.
 pub trait Plane {
     /// The value at boot. It must be safe.
     type Desired: Copy + PartialEq + Debug + Default;
-    /// The value before any report.
-    type Observed: Clone + PartialEq + Debug + Default;
+    /// The report of the owner of the devices of the plane.
+    type Report: Copy + PartialEq + Debug;
     type Target: Copy + PartialEq + Debug;
 
+    const ID: PlaneId;
     /// The target at boot.
     const SAFE: Self::Target;
 }
@@ -76,6 +77,8 @@ pub struct Granted<T> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Cause {
     DeviceFault(Device),
+    /// The daemon has no contact with the owner of the devices of the plane.
+    OwnerLost(PlaneId),
     ControllerStalled,
     Host(HostStatus),
     /// The host received no stream of the cam worker for the stream timeout.
@@ -85,7 +88,7 @@ pub enum Cause {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlaneState<P: Plane> {
     pub(crate) desired: P::Desired,
-    pub(crate) observed: P::Observed,
+    pub(crate) observed: Reported<P::Report>,
     pub(crate) target: P::Target,
     pub(crate) cause: Option<Cause>,
     /// The epoch of the last command that set this plane.
@@ -96,7 +99,7 @@ impl<P: Plane> PlaneState<P> {
     pub(crate) fn new() -> Self {
         Self {
             desired: P::Desired::default(),
-            observed: P::Observed::default(),
+            observed: Reported::Pending,
             target: P::SAFE,
             cause: None,
             epoch: Epoch::BOOT,
@@ -107,7 +110,7 @@ impl<P: Plane> PlaneState<P> {
         self.desired
     }
 
-    pub fn observed(&self) -> &P::Observed {
+    pub fn observed(&self) -> &Reported<P::Report> {
         &self.observed
     }
 
@@ -147,17 +150,14 @@ impl<P: Plane> PlaneState<P> {
         }
     }
 
-    /// Records the status of a device and lowers the plane if the policy says
-    /// so.
-    pub(crate) fn observe(
-        &mut self,
-        device: Device,
-        status: DeviceStatus,
-        field: impl FnOnce(&mut P::Observed) -> &mut DeviceStatus,
-    ) {
-        let before = core::mem::replace(field(&mut self.observed), status);
-        if policy::device_lowers(before, status) {
-            self.lower(Cause::DeviceFault(device));
+    /// Records `next`, and lowers the plane if `next` gives a cause.
+    pub(crate) fn observe(&mut self, next: Reported<P::Report>)
+    where
+        P::Report: Report,
+    {
+        let before = core::mem::replace(&mut self.observed, next);
+        if let Some(cause) = policy::cause(P::ID, &before, &next, self.epoch) {
+            self.lower(cause);
         }
     }
 

@@ -1,8 +1,8 @@
-use presencemux_core::{Cause, DeviceStatus, Observation, OnAir, PlaneId};
+use presencemux_core::{Cause, DeviceStatus, OnAir, PlaneId};
 use proptest::prelude::*;
 
 use crate::support::{
-    after, cause_after_lowering, device, events, not_fault, not_ready, observations,
+    after, cause_after_lowering, device, events, not_fault, not_ready, observations, report_with,
 };
 
 proptest! {
@@ -13,10 +13,10 @@ proptest! {
         status in not_ready(),
     ) {
         let mut controller = after(prefix);
-        let _ = controller.handle_input(Observation::Device(failed, DeviceStatus::Ready).into());
+        let _ = controller.handle_input(report_with(failed, DeviceStatus::Ready).into());
         let before = controller.clone();
 
-        let _ = controller.handle_input(Observation::Device(failed, status).into());
+        let _ = controller.handle_input(report_with(failed, status).into());
 
         let lowered = controller.plane(failed.plane());
         prop_assert_eq!(lowered.requested, OnAir::Off);
@@ -36,9 +36,9 @@ proptest! {
         before in not_fault(),
     ) {
         let mut controller = after(prefix);
-        let _ = controller.handle_input(Observation::Device(failed, before).into());
+        let _ = controller.handle_input(report_with(failed, before).into());
 
-        let _ = controller.handle_input(Observation::Device(failed, DeviceStatus::Fault).into());
+        let _ = controller.handle_input(report_with(failed, DeviceStatus::Fault).into());
 
         prop_assert_eq!(controller.plane(failed.plane()).requested, OnAir::Off);
     }
@@ -50,8 +50,8 @@ proptest! {
         later in observations(),
     ) {
         let mut controller = after(prefix);
-        let _ = controller.handle_input(Observation::Device(failed, DeviceStatus::Ready).into());
-        let _ = controller.handle_input(Observation::Device(failed, DeviceStatus::Fault).into());
+        let _ = controller.handle_input(report_with(failed, DeviceStatus::Ready).into());
+        let _ = controller.handle_input(report_with(failed, DeviceStatus::Fault).into());
 
         for observation in later {
             let _ = controller.handle_input(observation.into());

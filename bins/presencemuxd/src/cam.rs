@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use presencemux_api::cam::{self as api, CamProxy};
-use presencemux_core::{CamPermission, Device, Epoch, Observation, PlaneId};
+use presencemux_core::{CamPermission, CamReport, Epoch};
 use zlink::Connection;
 
-use crate::adapter::{Adapter, AdapterError, FIRST_WAIT, Latch, LatchReason, MAX_WAIT, Report};
+use crate::adapter::{Adapter, AdapterError, FIRST_WAIT, Latch, LatchReason, MAX_WAIT, Reply};
 use crate::config::Config;
 use crate::event_loop::{LEASE, Leased, Owner, REPORT_TIMEOUT, TICK};
 
@@ -66,10 +66,10 @@ impl Cam {
         }
     }
 
-    /// Returns the report of the cam worker in the types of the daemon. Keeps
+    /// Returns the reply of the cam worker in the types of the daemon. Keeps
     /// only a latch in the session of the last lease, the session of this
     /// daemon. Returns an error for a latch with an epoch out of range.
-    fn report(&self, report: &api::Report) -> Result<Report, AdapterError> {
+    fn reply(&self, report: &api::Report) -> Result<Reply<CamReport>, AdapterError> {
         let latch = report
             .latched
             .filter(|latch| latch.session_usec == self.session)
@@ -77,19 +77,19 @@ impl Cam {
                 let epoch =
                     u32::try_from(latch.epoch).map_err(|_| AdapterError::Invalid("latch epoch"))?;
                 Ok(Latch {
-                    plane: PlaneId::Cam,
                     epoch: Epoch::new(epoch),
                     reason: latch.reason.into(),
                 })
             })
             .transpose()?;
-        Ok(Report {
-            devices: vec![
-                (Device::Camera, report.camera.into()),
-                (Device::CamWorker, report.worker.into()),
-            ],
+        Ok(Reply {
+            report: CamReport {
+                worker: report.worker.into(),
+                camera: report.camera.into(),
+                stream: report.host.into(),
+                latched: latch.map(|latch| latch.epoch),
+            },
             latch,
-            observations: vec![Observation::CamStream(report.host.into())],
         })
     }
 
@@ -116,11 +116,15 @@ impl Cam {
 
 impl Adapter for Cam {
     type Command = Leased<CamPermission>;
+    type Report = CamReport;
 
     const OWNER: Owner = Owner::CamWorker;
     const TIMEOUT: Duration = Duration::from_millis(500);
 
-    async fn exchange(&mut self, command: Self::Command) -> Result<Report, AdapterError> {
+    async fn exchange(
+        &mut self,
+        command: Self::Command,
+    ) -> Result<Reply<Self::Report>, AdapterError> {
         self.session = command.session.as_micros();
         let lease = self.lease(command);
         let connection = if let Some(connection) = self.connection.take() {
@@ -137,7 +141,7 @@ impl Adapter for Cam {
             .map_err(transport)?
             .map_err(|api::Error::InvalidLease| AdapterError::Invalid("lease"))?;
         self.log(&renewed.report);
-        self.report(&renewed.report)
+        self.reply(&renewed.report)
     }
 
     fn reset(&mut self) {
@@ -178,6 +182,10 @@ mod tests {
 
     /// The session of the leases in the tests.
     const SESSION: Duration = Duration::from_secs(40);
+    /// [`SESSION`] in microseconds.
+    const SESSION_USEC: i64 = 40_000_000;
+    /// A session before [`SESSION`], in microseconds.
+    const OLDER_SESSION_USEC: i64 = 39_000_000;
 
     /// A scripted reply of the fake cam worker.
     #[derive(Clone, Debug)]
@@ -337,7 +345,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "local")]
-    async fn report_gives_the_status_of_the_camera_and_the_worker() {
+    async fn reply_gives_the_status_of_the_worker_and_the_camera() {
         let dir = tempfile::tempdir().unwrap();
         let reply = api::Report {
             camera: api::DeviceStatus::Initializing,
@@ -345,19 +353,16 @@ mod tests {
         };
         let (mut cam, _worker) = start(&dir, "", vec![Reply::Report(reply)]);
 
-        let report = cam.exchange(leased(CamPermission::Blank, 0)).await.unwrap();
+        let reply = cam.exchange(leased(CamPermission::Blank, 0)).await.unwrap();
 
         assert_eq!(
-            report.devices,
-            [
-                (Device::Camera, DeviceStatus::Initializing),
-                (Device::CamWorker, DeviceStatus::Ready),
-            ]
+            (reply.report.worker, reply.report.camera),
+            (DeviceStatus::Ready, DeviceStatus::Initializing)
         );
     }
 
     #[tokio::test(flavor = "local")]
-    async fn report_gives_the_stream_state_of_the_host() {
+    async fn reply_gives_the_stream_state_of_the_host() {
         let dir = tempfile::tempdir().unwrap();
         let reply = api::Report {
             host: api::HostStream::Streaming,
@@ -365,33 +370,35 @@ mod tests {
         };
         let (mut cam, _worker) = start(&dir, "", vec![Reply::Report(reply)]);
 
-        let report = cam.exchange(leased(CamPermission::Blank, 0)).await.unwrap();
+        let reply = cam.exchange(leased(CamPermission::Blank, 0)).await.unwrap();
 
-        assert_eq!(
-            report.observations,
-            [Observation::CamStream(CamStream::Streaming)]
-        );
+        assert_eq!(reply.report.stream, CamStream::Streaming);
     }
 
-    #[tokio::test(flavor = "local")]
-    async fn latch_of_this_session_gives_a_latch() {
-        let dir = tempfile::tempdir().unwrap();
-        let reply = api::Report {
+    /// Returns a report of the worker with a stalled latch at epoch 2 in
+    /// `session_usec`.
+    fn latched_report(session_usec: i64) -> api::Report {
+        api::Report {
             latched: Some(api::Latch {
-                session_usec: 40_000_000,
+                session_usec,
                 epoch: 2,
                 reason: api::LatchReason::Stalled,
             }),
             ..report()
-        };
+        }
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn latch_of_this_session_gives_the_latch_for_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let reply = latched_report(SESSION_USEC);
         let (mut cam, _worker) = start(&dir, "", vec![Reply::Report(reply)]);
 
-        let report = cam.exchange(leased(CamPermission::Live, 2)).await.unwrap();
+        let reply = cam.exchange(leased(CamPermission::Live, 2)).await.unwrap();
 
         assert_eq!(
-            report.latch,
+            reply.latch,
             Some(Latch {
-                plane: PlaneId::Cam,
                 epoch: Epoch::new(2),
                 reason: LatchReason::Stalled,
             })
@@ -399,21 +406,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "local")]
-    async fn latch_of_another_session_gives_no_latch() {
+    async fn latch_of_this_session_gives_its_epoch_in_the_report() {
         let dir = tempfile::tempdir().unwrap();
-        let reply = api::Report {
-            latched: Some(api::Latch {
-                session_usec: 39_000_000,
-                epoch: 2,
-                reason: api::LatchReason::Expired,
-            }),
-            ..report()
-        };
+        let reply = latched_report(SESSION_USEC);
         let (mut cam, _worker) = start(&dir, "", vec![Reply::Report(reply)]);
 
-        let report = cam.exchange(leased(CamPermission::Live, 2)).await.unwrap();
+        let reply = cam.exchange(leased(CamPermission::Live, 2)).await.unwrap();
 
-        assert_eq!(report.latch, None);
+        assert_eq!(reply.report.latched, Some(Epoch::new(2)));
+    }
+
+    #[tokio::test(flavor = "local")]
+    async fn latch_of_another_session_gives_no_latch_in_the_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let reply = latched_report(OLDER_SESSION_USEC);
+        let (mut cam, _worker) = start(&dir, "", vec![Reply::Report(reply)]);
+
+        let reply = cam.exchange(leased(CamPermission::Live, 2)).await.unwrap();
+
+        assert_eq!(reply.report.latched, None);
     }
 
     #[tokio::test(flavor = "local")]
@@ -447,9 +458,9 @@ mod tests {
         cam.reset();
         time::sleep(Duration::from_millis(300)).await;
 
-        let report = cam.exchange(leased(CamPermission::Blank, 0)).await.unwrap();
+        let reply = cam.exchange(leased(CamPermission::Blank, 0)).await.unwrap();
 
-        assert_eq!(report.devices[0], (Device::Camera, DeviceStatus::Ready));
+        assert_eq!(reply.report.camera, DeviceStatus::Ready);
     }
 
     #[tokio::test(flavor = "local")]

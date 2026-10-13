@@ -5,6 +5,7 @@ mod device_fault;
 mod effects;
 mod host;
 mod lapsed_lease;
+mod lost;
 mod observation;
 mod policy;
 mod request;

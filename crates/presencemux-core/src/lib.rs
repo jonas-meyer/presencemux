@@ -12,14 +12,16 @@ mod on_air;
 mod plane;
 mod policy;
 mod preset;
+mod report;
 
-pub use cam::{Cam, CamObserved, CamPermission, CamStream, SlateId};
+pub use cam::{Cam, CamPermission, CamReport, CamStream, SlateId};
 pub use device::{Device, DeviceStatus, Health};
 pub use host::HostStatus;
-pub use mic::{Mic, MicMute, MicObserved, MicPermission};
+pub use mic::{Mic, MicMute, MicPermission, MicReport};
 pub use on_air::OnAir;
 pub use plane::{Cause, Epoch, Granted, Plane, PlaneId, PlaneState, PlaneSummary, PrivacyPlane};
 pub use preset::Preset;
+pub use report::{Report, Reported};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -36,14 +38,17 @@ pub enum Command {
 /// An input from automation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Observation {
-    Device(Device, DeviceStatus),
+    /// A report of the cam worker.
+    Cam(CamReport),
+    /// A report of the audio worker.
+    Mic(MicReport),
+    /// The daemon has no contact with the owner of the devices of this plane.
+    Lost(PlaneId),
     /// A lease of this plane lapsed. The media layer or the event loop reports
     /// it, with the epoch of the lease. A lapse with an epoch older than the
     /// last command for this plane has no effect.
     LeaseExpired(PlaneId, Epoch),
     Host(HostStatus),
-    /// The host started or stopped the stream of the cam worker.
-    CamStream(CamStream),
     /// The host received no stream of the cam worker for the stream timeout.
     /// The event loop reports it, with the epoch of the cam plane at the start
     /// of the time without a stream. A timeout with an epoch older than the
@@ -55,6 +60,18 @@ pub enum Observation {
 impl From<Command> for Event {
     fn from(command: Command) -> Self {
         Self::Command(command)
+    }
+}
+
+impl From<CamReport> for Observation {
+    fn from(report: CamReport) -> Self {
+        Self::Cam(report)
+    }
+}
+
+impl From<MicReport> for Observation {
+    fn from(report: MicReport) -> Self {
+        Self::Mic(report)
     }
 }
 
@@ -101,18 +118,22 @@ impl Controller {
         let before = self.clone();
         match event {
             Event::Command(Command::Apply(preset)) => self.apply(preset),
-            Event::Observation(Observation::Device(device, status)) => {
-                self.observe(device, status);
+            Event::Observation(Observation::Cam(report)) => {
+                self.cam.observe(Reported::Fresh(report));
             }
+            Event::Observation(Observation::Mic(report)) => {
+                self.mic.observe(Reported::Fresh(report));
+            }
+            Event::Observation(Observation::Lost(plane)) => match plane {
+                PlaneId::Cam => self.cam.observe(Reported::Lost),
+                PlaneId::Mic => self.mic.observe(Reported::Lost),
+            },
             Event::Observation(Observation::LeaseExpired(plane, epoch)) => {
                 if epoch >= self.granted(plane) {
                     self.lower(plane, Cause::ControllerStalled);
                 }
             }
             Event::Observation(Observation::Host(status)) => self.observe_host(status),
-            Event::Observation(Observation::CamStream(stream)) => {
-                self.cam.observed.stream = stream;
-            }
             Event::Observation(Observation::StreamTimeout(epoch)) => {
                 if policy::stream_lowers(&self.cam, epoch) {
                     self.lower(PlaneId::Cam, Cause::StreamStopped);
@@ -152,9 +173,7 @@ impl Controller {
     }
 
     pub fn health(&self) -> Health {
-        let cam = self.cam.observed();
-        let mic = self.mic.observed();
-        policy::health([cam.camera, cam.worker, mic.interface, mic.gate])
+        policy::health(self.cam.observed()).max(policy::health(self.mic.observed()))
     }
 
     pub fn cam(&self) -> &PlaneState<Cam> {
@@ -192,20 +211,6 @@ impl Controller {
         }
     }
 
-    fn observe(&mut self, device: Device, status: DeviceStatus) {
-        match device {
-            Device::Camera => self.cam.observe(device, status, |o| &mut o.camera),
-            Device::CamWorker => {
-                self.cam.observe(device, status, |o| &mut o.worker);
-                if !status.is_ready() {
-                    self.cam.observed.stream = CamStream::Idle;
-                }
-            }
-            Device::AudioInterface => self.mic.observe(device, status, |o| &mut o.interface),
-            Device::Gate => self.mic.observe(device, status, |o| &mut o.gate),
-        }
-    }
-
     fn observe_host(&mut self, status: HostStatus) {
         let before = core::mem::replace(&mut self.host, status);
         if policy::host_lowers(before, status) {
@@ -226,10 +231,23 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use DeviceStatus::{Fault, Ready};
+    use DeviceStatus::{Fault, Missing, Ready};
 
-    fn device(device: Device, status: DeviceStatus) -> Event {
-        Observation::Device(device, status).into()
+    fn cam(worker: DeviceStatus, camera: DeviceStatus) -> CamReport {
+        CamReport {
+            worker,
+            camera,
+            stream: CamStream::Idle,
+            latched: None,
+        }
+    }
+
+    fn mic(gate: DeviceStatus, interface: DeviceStatus) -> MicReport {
+        MicReport {
+            gate,
+            interface,
+            latched: None,
+        }
     }
 
     fn live() -> Event {
@@ -248,31 +266,53 @@ mod tests {
         controller
     }
 
+    /// Returns a controller with ready devices and both planes live.
+    fn live_controller() -> Controller {
+        after(&[
+            Observation::Cam(cam(Ready, Ready)).into(),
+            Observation::Mic(mic(Ready, Ready)).into(),
+            live(),
+        ])
+    }
+
     #[test]
-    fn command_with_ready_devices_goes_live_under_a_newer_epoch() {
+    fn command_with_ready_devices_goes_live() {
         let mut controller = after(&[
-            device(Device::Camera, Ready),
-            device(Device::CamWorker, Ready),
-            device(Device::AudioInterface, Ready),
-            device(Device::Gate, Ready),
+            Observation::Cam(cam(Ready, Ready)).into(),
+            Observation::Mic(mic(Ready, Ready)).into(),
         ]);
-        let before = controller.epoch();
 
         let effects = controller.handle_input(live());
 
-        let cam = effects.cam.unwrap();
-        let mic = effects.mic.unwrap();
-        assert_eq!(cam.permission, CamPermission::Live);
-        assert_eq!(mic.permission, MicPermission::Permitted);
-        assert!(cam.epoch > before);
-        assert!(mic.epoch > before);
+        assert_eq!(
+            (
+                effects.cam.unwrap().permission,
+                effects.mic.unwrap().permission
+            ),
+            (CamPermission::Live, MicPermission::Permitted)
+        );
+    }
+
+    #[test]
+    fn command_grants_its_targets_under_the_next_epoch() {
+        let mut controller = after(&[
+            Observation::Cam(cam(Ready, Ready)).into(),
+            Observation::Mic(mic(Ready, Ready)).into(),
+        ]);
+
+        let effects = controller.handle_input(live());
+
+        assert_eq!(
+            (effects.cam.unwrap().epoch, effects.mic.unwrap().epoch),
+            (Epoch::new(1), Epoch::new(1))
+        );
     }
 
     #[test]
     fn device_starting_after_the_command_lets_the_plane_rise() {
-        let mut controller = after(&[device(Device::CamWorker, Ready), live()]);
+        let mut controller = after(&[Observation::Cam(cam(Ready, Missing)).into(), live()]);
 
-        let effects = controller.handle_input(device(Device::Camera, Ready));
+        let effects = controller.handle_input(Observation::Cam(cam(Ready, Ready)).into());
 
         assert_eq!(effects.cam.map(|g| g.permission), Some(CamPermission::Live));
     }
@@ -280,23 +320,109 @@ mod tests {
     #[test]
     fn fault_before_the_device_is_ready_cancels_the_pending_live() {
         let mut controller = after(&[
-            device(Device::CamWorker, Ready),
+            Observation::Cam(cam(Ready, Missing)).into(),
             live(),
-            device(Device::Camera, Fault),
+            Observation::Cam(cam(Ready, Fault)).into(),
         ]);
 
-        let _ = controller.handle_input(device(Device::Camera, Ready));
+        let _ = controller.handle_input(Observation::Cam(cam(Ready, Ready)).into());
 
         assert_eq!(controller.cam().target().permission, CamPermission::Blank);
     }
 
     #[test]
+    fn report_with_a_worker_fault_and_a_camera_fault_gives_the_worker_fault() {
+        let mut controller = live_controller();
+
+        let _ = controller.handle_input(Observation::Cam(cam(Fault, Fault)).into());
+
+        assert_eq!(
+            controller.cam().cause(),
+            Some(Cause::DeviceFault(Device::CamWorker))
+        );
+    }
+
+    #[test]
+    fn report_with_a_gate_fault_and_a_missing_interface_gives_the_gate_fault() {
+        let mut controller = live_controller();
+
+        let _ = controller.handle_input(Observation::Mic(mic(Fault, Missing)).into());
+
+        assert_eq!(
+            controller.mic().cause(),
+            Some(Cause::DeviceFault(Device::Gate))
+        );
+    }
+
+    #[test]
+    fn lost_owner_lowers_its_plane_with_owner_lost() {
+        let mut controller = live_controller();
+
+        let _ = controller.handle_input(Observation::Lost(PlaneId::Cam).into());
+
+        assert_eq!(
+            controller.cam().cause(),
+            Some(Cause::OwnerLost(PlaneId::Cam))
+        );
+    }
+
+    #[test]
+    fn lost_owner_keeps_the_other_plane() {
+        let mut controller = live_controller();
+
+        let _ = controller.handle_input(Observation::Lost(PlaneId::Cam).into());
+
+        assert_eq!(
+            controller.mic().target().permission,
+            MicPermission::Permitted
+        );
+    }
+
+    #[test]
+    fn latch_of_the_current_grant_lowers_its_plane_as_stalled() {
+        let mut controller = live_controller();
+        let report = CamReport {
+            latched: Some(controller.granted(PlaneId::Cam)),
+            ..cam(Ready, Ready)
+        };
+
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        assert_eq!(controller.cam().cause(), Some(Cause::ControllerStalled));
+    }
+
+    #[test]
+    fn latch_from_before_the_last_command_keeps_the_live_cam() {
+        let mut controller = live_controller();
+        let report = CamReport {
+            latched: Some(Epoch::BOOT),
+            ..cam(Ready, Ready)
+        };
+
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        assert_eq!(controller.cam().target().permission, CamPermission::Live);
+    }
+
+    #[test]
+    fn report_with_a_fault_and_a_latch_gives_the_fault() {
+        let mut controller = live_controller();
+        let report = CamReport {
+            latched: Some(controller.granted(PlaneId::Cam)),
+            ..cam(Ready, Fault)
+        };
+
+        let _ = controller.handle_input(Observation::Cam(report).into());
+
+        assert_eq!(
+            controller.cam().cause(),
+            Some(Cause::DeviceFault(Device::Camera))
+        );
+    }
+
+    #[test]
     fn stream_timeout_while_idle_lowers_the_live_cam_with_stream_stopped() {
-        let mut controller = after(&[
-            device(Device::Camera, Ready),
-            device(Device::CamWorker, Ready),
-            live(),
-        ]);
+        let mut controller = live_controller();
         let epoch = controller.granted(PlaneId::Cam);
 
         let _ = controller.handle_input(Observation::StreamTimeout(epoch).into());
@@ -306,12 +432,11 @@ mod tests {
 
     #[test]
     fn stream_timeout_while_streaming_keeps_the_live_cam() {
-        let mut controller = after(&[
-            device(Device::Camera, Ready),
-            device(Device::CamWorker, Ready),
-            live(),
-            Observation::CamStream(CamStream::Streaming).into(),
-        ]);
+        let streaming = CamReport {
+            stream: CamStream::Streaming,
+            ..cam(Ready, Ready)
+        };
+        let mut controller = after(&[Observation::Cam(streaming).into(), live()]);
         let epoch = controller.granted(PlaneId::Cam);
 
         let _ = controller.handle_input(Observation::StreamTimeout(epoch).into());
@@ -322,7 +447,7 @@ mod tests {
     #[test]
     fn stream_timeout_while_idle_lowers_a_slate() {
         let mut controller = after(&[
-            device(Device::CamWorker, Ready),
+            Observation::Cam(cam(Ready, Missing)).into(),
             Command::Apply(Preset {
                 cam: Some(CamPermission::Slate(SlateId(0))),
                 mic: None,
@@ -337,23 +462,17 @@ mod tests {
     }
 
     #[test]
-    fn cam_worker_that_is_not_ready_gives_an_idle_stream() {
-        let mut controller = after(&[
-            device(Device::CamWorker, Ready),
-            Observation::CamStream(CamStream::Streaming).into(),
-        ]);
+    fn health_is_degraded_while_an_owner_has_not_reported() {
+        let controller = after(&[Observation::Mic(mic(Ready, Ready)).into()]);
 
-        let _ = controller.handle_input(device(Device::CamWorker, Fault));
-
-        assert_eq!(controller.cam().observed().stream, CamStream::Idle);
+        assert_eq!(controller.health(), Health::Degraded);
     }
 
     #[test]
     fn health_is_degraded_while_a_device_is_missing() {
         let controller = after(&[
-            device(Device::CamWorker, Ready),
-            device(Device::AudioInterface, Ready),
-            device(Device::Gate, Ready),
+            Observation::Cam(cam(Ready, Missing)).into(),
+            Observation::Mic(mic(Ready, Ready)).into(),
         ]);
 
         assert_eq!(controller.health(), Health::Degraded);
@@ -361,7 +480,17 @@ mod tests {
 
     #[test]
     fn health_is_fault_when_a_device_has_a_fault() {
-        let controller = after(&[device(Device::Gate, Fault)]);
+        let controller = after(&[Observation::Mic(mic(Fault, Ready)).into()]);
+
+        assert_eq!(controller.health(), Health::Fault);
+    }
+
+    #[test]
+    fn health_is_fault_when_an_owner_is_lost() {
+        let controller = after(&[
+            Observation::Cam(cam(Ready, Ready)).into(),
+            Observation::Lost(PlaneId::Mic).into(),
+        ]);
 
         assert_eq!(controller.health(), Health::Fault);
     }
@@ -369,10 +498,8 @@ mod tests {
     #[test]
     fn health_is_ready_when_every_device_is_ready() {
         let controller = after(&[
-            device(Device::Camera, Ready),
-            device(Device::CamWorker, Ready),
-            device(Device::AudioInterface, Ready),
-            device(Device::Gate, Ready),
+            Observation::Cam(cam(Ready, Ready)).into(),
+            Observation::Mic(mic(Ready, Ready)).into(),
         ]);
 
         assert_eq!(controller.health(), Health::Ready);
@@ -380,9 +507,9 @@ mod tests {
 
     #[test]
     fn unchanged_report_gives_no_effects() {
-        let mut controller = after(&[device(Device::Camera, Ready)]);
+        let mut controller = after(&[Observation::Cam(cam(Ready, Ready)).into()]);
 
-        let effects = controller.handle_input(device(Device::Camera, Ready));
+        let effects = controller.handle_input(Observation::Cam(cam(Ready, Ready)).into());
 
         assert_eq!(effects, Effects::default());
     }

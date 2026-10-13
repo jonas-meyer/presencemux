@@ -1,0 +1,56 @@
+---
+source: crates/presencemux-core/tests/safety/policy.rs
+expression: table
+---
+before (worker, camera) | after | cause
+Lost | Lost | -
+Lost | Missing, Missing | -
+Lost | Missing, Initializing | -
+Lost | Missing, Ready | -
+Lost | Missing, Fault | DeviceFault(Camera)
+Lost | Initializing, Missing | -
+Lost | Initializing, Initializing | -
+Lost | Initializing, Ready | -
+Lost | Initializing, Fault | DeviceFault(Camera)
+Lost | Ready, Missing | -
+Lost | Ready, Initializing | -
+Lost | Ready, Ready | -
+Lost | Ready, Fault | DeviceFault(Camera)
+Lost | Fault, Missing | DeviceFault(CamWorker)
+Lost | Fault, Initializing | DeviceFault(CamWorker)
+Lost | Fault, Ready | DeviceFault(CamWorker)
+Lost | Fault, Fault | DeviceFault(CamWorker)
+Missing, Missing | Lost | OwnerLost(Cam)
+Missing, Missing | Missing, Missing | -
+Missing, Missing | Missing, Initializing | -
+Missing, Missing | Missing, Ready | -
+Missing, Missing | Missing, Fault | DeviceFault(Camera)
+Missing, Missing | Initializing, Missing | -
+Missing, Missing | Initializing, Initializing | -
+Missing, Missing | Initializing, Ready | -
+Missing, Missing | Initializing, Fault | DeviceFault(Camera)
+Missing, Missing | Ready, Missing | -
+Missing, Missing | Ready, Initializing | -
+Missing, Missing | Ready, Ready | -
+Missing, Missing | Ready, Fault | DeviceFault(Camera)
+Missing, Missing | Fault, Missing | DeviceFault(CamWorker)
+Missing, Missing | Fault, Initializing | DeviceFault(CamWorker)
+Missing, Missing | Fault, Ready | DeviceFault(CamWorker)
+Missing, Missing | Fault, Fault | DeviceFault(CamWorker)
+Ready, Ready | Lost | OwnerLost(Cam)
+Ready, Ready | Missing, Missing | DeviceFault(CamWorker)
+Ready, Ready | Missing, Initializing | DeviceFault(CamWorker)
+Ready, Ready | Missing, Ready | DeviceFault(CamWorker)
+Ready, Ready | Missing, Fault | DeviceFault(CamWorker)
+Ready, Ready | Initializing, Missing | DeviceFault(CamWorker)
+Ready, Ready | Initializing, Initializing | DeviceFault(CamWorker)
+Ready, Ready | Initializing, Ready | DeviceFault(CamWorker)
+Ready, Ready | Initializing, Fault | DeviceFault(CamWorker)
+Ready, Ready | Ready, Missing | DeviceFault(Camera)
+Ready, Ready | Ready, Initializing | DeviceFault(Camera)
+Ready, Ready | Ready, Ready | -
+Ready, Ready | Ready, Fault | DeviceFault(Camera)
+Ready, Ready | Fault, Missing | DeviceFault(CamWorker)
+Ready, Ready | Fault, Initializing | DeviceFault(CamWorker)
+Ready, Ready | Fault, Ready | DeviceFault(CamWorker)
+Ready, Ready | Fault, Fault | DeviceFault(CamWorker)

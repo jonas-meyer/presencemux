@@ -1,0 +1,56 @@
+---
+source: crates/presencemux-core/tests/safety/policy.rs
+expression: table
+---
+before (gate, interface) | after | cause
+Lost | Lost | -
+Lost | Missing, Missing | -
+Lost | Missing, Initializing | -
+Lost | Missing, Ready | -
+Lost | Missing, Fault | DeviceFault(AudioInterface)
+Lost | Initializing, Missing | -
+Lost | Initializing, Initializing | -
+Lost | Initializing, Ready | -
+Lost | Initializing, Fault | DeviceFault(AudioInterface)
+Lost | Ready, Missing | -
+Lost | Ready, Initializing | -
+Lost | Ready, Ready | -
+Lost | Ready, Fault | DeviceFault(AudioInterface)
+Lost | Fault, Missing | DeviceFault(Gate)
+Lost | Fault, Initializing | DeviceFault(Gate)
+Lost | Fault, Ready | DeviceFault(Gate)
+Lost | Fault, Fault | DeviceFault(Gate)
+Missing, Missing | Lost | OwnerLost(Mic)
+Missing, Missing | Missing, Missing | -
+Missing, Missing | Missing, Initializing | -
+Missing, Missing | Missing, Ready | -
+Missing, Missing | Missing, Fault | DeviceFault(AudioInterface)
+Missing, Missing | Initializing, Missing | -
+Missing, Missing | Initializing, Initializing | -
+Missing, Missing | Initializing, Ready | -
+Missing, Missing | Initializing, Fault | DeviceFault(AudioInterface)
+Missing, Missing | Ready, Missing | -
+Missing, Missing | Ready, Initializing | -
+Missing, Missing | Ready, Ready | -
+Missing, Missing | Ready, Fault | DeviceFault(AudioInterface)
+Missing, Missing | Fault, Missing | DeviceFault(Gate)
+Missing, Missing | Fault, Initializing | DeviceFault(Gate)
+Missing, Missing | Fault, Ready | DeviceFault(Gate)
+Missing, Missing | Fault, Fault | DeviceFault(Gate)
+Ready, Ready | Lost | OwnerLost(Mic)
+Ready, Ready | Missing, Missing | DeviceFault(Gate)
+Ready, Ready | Missing, Initializing | DeviceFault(Gate)
+Ready, Ready | Missing, Ready | DeviceFault(Gate)
+Ready, Ready | Missing, Fault | DeviceFault(Gate)
+Ready, Ready | Initializing, Missing | DeviceFault(Gate)
+Ready, Ready | Initializing, Initializing | DeviceFault(Gate)
+Ready, Ready | Initializing, Ready | DeviceFault(Gate)
+Ready, Ready | Initializing, Fault | DeviceFault(Gate)
+Ready, Ready | Ready, Missing | DeviceFault(AudioInterface)
+Ready, Ready | Ready, Initializing | DeviceFault(AudioInterface)
+Ready, Ready | Ready, Ready | -
+Ready, Ready | Ready, Fault | DeviceFault(AudioInterface)
+Ready, Ready | Fault, Missing | DeviceFault(Gate)
+Ready, Ready | Fault, Initializing | DeviceFault(Gate)
+Ready, Ready | Fault, Ready | DeviceFault(Gate)
+Ready, Ready | Fault, Fault | DeviceFault(Gate)

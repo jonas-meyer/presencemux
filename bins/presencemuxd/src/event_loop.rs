@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use presencemux_api::Status;
 use presencemux_core::{
-    CamPermission, CamStream, Command, Controller, Device, DeviceStatus, Effects, Epoch, Event,
-    Granted, MicPermission, Observation, PlaneId, Preset,
+    CamPermission, CamStream, Command, Controller, Effects, Epoch, Event, Granted, MicPermission,
+    Observation, PlaneId, Preset,
 };
 use rustix::time::{ClockId, clock_gettime};
 use tokio::sync::mpsc::error::TrySendError;
@@ -21,8 +21,8 @@ use crate::systemd;
 const CAPACITY: usize = 64;
 pub(crate) const TICK: Duration = Duration::from_millis(200);
 pub(crate) const LEASE: Duration = Duration::from_secs(1);
-/// The longest time between two reports of an owner. After it, the devices of
-/// the owner are at fault.
+/// The longest time between two reports of an owner. After it, the event loop
+/// reports the owner as lost.
 pub(crate) const REPORT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A time on `CLOCK_MONOTONIC`. Other processes on the same computer read
@@ -60,20 +60,12 @@ impl fmt::Display for Owner {
 }
 
 impl Owner {
-    /// Returns the devices of the owner.
-    pub(crate) const fn devices(self) -> &'static [Device] {
+    /// Returns the plane of the devices of the owner.
+    pub(crate) const fn plane(self) -> PlaneId {
         match self {
-            Self::CamWorker => &[Device::Camera, Device::CamWorker],
-            Self::AudioWorker => &[Device::Gate, Device::AudioInterface],
+            Self::CamWorker => PlaneId::Cam,
+            Self::AudioWorker => PlaneId::Mic,
         }
-    }
-
-    /// Returns a fault for each device of the owner.
-    pub(crate) fn faults(self) -> Vec<Observation> {
-        self.devices()
-            .iter()
-            .map(|&device| Observation::Device(device, DeviceStatus::Fault))
-            .collect()
     }
 }
 
@@ -147,16 +139,16 @@ struct StreamIdle {
 struct LastReport {
     owner: Owner,
     at: Instant,
-    /// Whether the report is older than [`REPORT_TIMEOUT`], and the devices of
-    /// the owner are at fault.
+    /// Whether the report is older than [`REPORT_TIMEOUT`].
     stale: bool,
 }
 
 #[derive(Debug)]
 pub(crate) enum Message {
     Request(Request, oneshot::Sender<()>),
-    /// The observations of one report of an owner.
-    Report(Owner, Vec<Observation>),
+    /// The observation of one report of an owner, or `Lost` after a failed
+    /// exchange.
+    Report(Owner, Observation),
     /// An observation that no owner reports, for example the host status.
     Observation(Observation),
 }
@@ -183,15 +175,15 @@ impl Handle {
         handled.await.map_err(|_| HandleError::Stopped)
     }
 
-    /// Sends the observations of a report of `owner`. It waits while the
+    /// Sends the observation of a report of `owner`. It waits while the
     /// channel is full.
     pub(crate) async fn report(
         &self,
         owner: Owner,
-        observations: Vec<Observation>,
+        observation: Observation,
     ) -> Result<(), HandleError> {
         self.0
-            .send(Message::Report(owner, observations))
+            .send(Message::Report(owner, observation))
             .await
             .map_err(|_| HandleError::Stopped)
     }
@@ -299,9 +291,9 @@ impl EventLoop {
                 self.publish();
                 let _ = done.send(());
             }
-            Message::Report(owner, observations) => {
+            Message::Report(owner, observation) => {
                 self.record_report(owner);
-                self.observe(observations);
+                self.observe([observation]);
             }
             Message::Observation(observation) => self.observe([observation]),
         }
@@ -338,22 +330,22 @@ impl EventLoop {
         }
     }
 
-    /// Sets the devices of each owner without a report for [`REPORT_TIMEOUT`]
-    /// to fault, once until the next report.
+    /// Reports each owner without a report for [`REPORT_TIMEOUT`] as lost,
+    /// once until the next report.
     fn check_reports(&mut self, now: Instant) {
-        let mut faults = Vec::new();
+        let mut lost = Vec::new();
         for last in &mut self.reports {
             if !last.stale && now - last.at > REPORT_TIMEOUT {
                 tracing::warn!(
-                    "the devices of the {} are at fault after {} ms without a report",
+                    "the {} is lost after {} ms without a report",
                     last.owner,
                     REPORT_TIMEOUT.as_millis()
                 );
                 last.stale = true;
-                faults.extend(last.owner.faults());
+                lost.push(Observation::Lost(last.owner.plane()));
             }
         }
-        self.observe(faults);
+        self.observe(lost);
     }
 
     /// Sends `StreamTimeout` once when the host has received no stream of the
@@ -363,7 +355,7 @@ impl EventLoop {
         let Some(timeout) = self.config.stream_timeout else {
             return;
         };
-        if self.controller.cam().observed().stream == CamStream::Streaming {
+        if self.controller.cam().stream() == CamStream::Streaming {
             self.stream_idle = None;
             return;
         }
@@ -467,7 +459,7 @@ impl Clock {
 #[cfg(test)]
 mod tests {
     use presencemux_api::{Cause, Health, Mute};
-    use presencemux_core::MicMute;
+    use presencemux_core::{CamReport, DeviceStatus, MicMute, MicReport};
 
     use super::*;
 
@@ -478,13 +470,37 @@ mod tests {
         (config, handle, outputs)
     }
 
-    async fn ready(handle: &Handle, devices: &[Device]) {
-        for &device in devices {
-            handle
-                .observe(Observation::Device(device, DeviceStatus::Ready))
-                .await
-                .unwrap();
+    const CAM_READY: CamReport = CamReport {
+        worker: DeviceStatus::Ready,
+        camera: DeviceStatus::Ready,
+        stream: CamStream::Idle,
+        latched: None,
+    };
+
+    const MIC_READY: MicReport = MicReport {
+        gate: DeviceStatus::Ready,
+        interface: DeviceStatus::Ready,
+        latched: None,
+    };
+
+    /// Sends a report with ready devices for each plane in `planes`.
+    async fn ready(handle: &Handle, planes: &[PlaneId]) {
+        for &plane in planes {
+            let report = match plane {
+                PlaneId::Cam => Observation::Cam(CAM_READY),
+                PlaneId::Mic => Observation::Mic(MIC_READY),
+            };
+            handle.observe(report).await.unwrap();
         }
+    }
+
+    /// Sends a report of the cam worker with ready devices and `stream`.
+    async fn stream(handle: &Handle, stream: CamStream) {
+        let report = CamReport {
+            stream,
+            ..CAM_READY
+        };
+        handle.observe(Observation::Cam(report)).await.unwrap();
     }
 
     fn live() -> Request {
@@ -505,13 +521,6 @@ mod tests {
             },
             name: None,
         }
-    }
-
-    fn ready_observations() -> Vec<Observation> {
-        vec![
-            Observation::Device(Device::Camera, DeviceStatus::Ready),
-            Observation::Device(Device::CamWorker, DeviceStatus::Ready),
-        ]
     }
 
     fn mic(mute: MicMute) -> Request {
@@ -542,7 +551,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_new_target_is_leased_before_the_next_tick() {
         let (_, handle, outputs) = start("");
-        ready(&handle, &Device::ALL).await;
+        ready(&handle, &PlaneId::ALL).await;
 
         handle.request(live()).await.unwrap();
 
@@ -582,7 +591,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn late_tick_lowers_every_plane() {
         let (_, handle, outputs) = start("");
-        ready(&handle, &Device::ALL).await;
+        ready(&handle, &PlaneId::ALL).await;
         handle.request(live()).await.unwrap();
 
         time::advance(2 * LEASE).await;
@@ -605,7 +614,7 @@ mod tests {
     async fn automation_keeps_the_preset_name() {
         let (config, handle, mut outputs) = start("[presets.talk]\nmic = \"unmuted\"\n");
         let (name, preset) = config.preset("talk").unwrap();
-        ready(&handle, &[Device::AudioInterface, Device::Gate]).await;
+        ready(&handle, &[PlaneId::Mic]).await;
         handle
             .request(Request {
                 preset,
@@ -616,7 +625,10 @@ mod tests {
         outputs.status.mark_unchanged();
 
         handle
-            .observe(Observation::Device(Device::Gate, DeviceStatus::Fault))
+            .observe(Observation::Mic(MicReport {
+                gate: DeviceStatus::Fault,
+                ..MIC_READY
+            }))
             .await
             .unwrap();
         time::timeout(LEASE, outputs.status.changed())
@@ -650,7 +662,7 @@ mod tests {
     async fn report_that_changes_no_status_field_sends_no_status() {
         let (_, handle, outputs) = start("");
 
-        ready(&handle, &[Device::Camera]).await;
+        ready(&handle, &[PlaneId::Cam]).await;
         settle().await;
 
         assert!(!outputs.status.has_changed().unwrap());
@@ -661,7 +673,7 @@ mod tests {
         let config = Arc::new(Config::parse("").unwrap());
         let (_event_loop, handle, _outputs) = EventLoop::new(config);
         for _ in 0..CAPACITY {
-            ready(&handle, &[Device::Camera]).await;
+            ready(&handle, &[PlaneId::Cam]).await;
         }
 
         let result = handle.request(mic(MicMute::Muted)).await;
@@ -681,10 +693,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn owner_without_a_report_for_2_s_is_at_fault() {
+    async fn owner_without_a_report_for_2_s_sets_the_health_to_fault() {
         let (_, handle, outputs) = start("");
         handle
-            .report(Owner::CamWorker, ready_observations())
+            .report(Owner::CamWorker, Observation::Cam(CAM_READY))
             .await
             .unwrap();
 
@@ -694,17 +706,50 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn cam_worker_without_a_report_for_2_s_lowers_the_cam_as_lost() {
+        let (handle, outputs) = start_with_live_cam("").await;
+        handle
+            .report(Owner::CamWorker, Observation::Cam(CAM_READY))
+            .await
+            .unwrap();
+
+        time::sleep(Duration::from_millis(2_300)).await;
+
+        assert_eq!(
+            outputs.status.borrow().cam.cause,
+            Some(Cause::CamWorkerLost)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn audio_worker_without_a_report_for_2_s_lowers_the_mic_as_lost() {
+        let (_, handle, outputs) = start("");
+        handle.request(mic(MicMute::Unmuted)).await.unwrap();
+        handle
+            .report(Owner::AudioWorker, Observation::Mic(MIC_READY))
+            .await
+            .unwrap();
+
+        time::sleep(Duration::from_millis(2_300)).await;
+
+        assert_eq!(
+            outputs.status.borrow().mic.cause,
+            Some(Cause::AudioWorkerLost)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn owner_with_a_report_every_1800_ms_keeps_the_cam_live() {
         let (_, handle, outputs) = start("");
         handle
-            .report(Owner::CamWorker, ready_observations())
+            .report(Owner::CamWorker, Observation::Cam(CAM_READY))
             .await
             .unwrap();
         handle.request(cam(CamPermission::Live)).await.unwrap();
 
         time::sleep(Duration::from_millis(1_800)).await;
         handle
-            .report(Owner::CamWorker, ready_observations())
+            .report(Owner::CamWorker, Observation::Cam(CAM_READY))
             .await
             .unwrap();
         time::sleep(Duration::from_millis(1_800)).await;
@@ -713,7 +758,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn owner_that_never_reported_has_no_fault() {
+    async fn owner_that_never_reported_is_not_lost() {
         let (_, _handle, outputs) = start("");
 
         time::sleep(Duration::from_millis(2_300)).await;
@@ -722,10 +767,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn late_tick_does_not_set_an_owner_to_fault() {
+    async fn late_tick_does_not_set_an_owner_to_lost() {
         let (_, handle, outputs) = start("");
         handle
-            .report(Owner::CamWorker, ready_observations())
+            .report(Owner::CamWorker, Observation::Cam(CAM_READY))
             .await
             .unwrap();
         settle().await;
@@ -740,7 +785,7 @@ mod tests {
     /// and the cam plane live.
     async fn start_with_live_cam(config: &str) -> (Handle, Outputs) {
         let (_, handle, outputs) = start(config);
-        ready(&handle, &[Device::Camera, Device::CamWorker]).await;
+        ready(&handle, &[PlaneId::Cam]).await;
         handle.request(cam(CamPermission::Live)).await.unwrap();
         (handle, outputs)
     }
@@ -773,15 +818,9 @@ mod tests {
     async fn second_time_without_a_stream_also_lowers_the_cam() {
         let (handle, outputs) = start_with_live_cam("").await;
         time::sleep(Duration::from_secs(10)).await;
-        handle
-            .observe(Observation::CamStream(CamStream::Streaming))
-            .await
-            .unwrap();
+        stream(&handle, CamStream::Streaming).await;
         time::sleep(Duration::from_secs(10)).await;
-        handle
-            .observe(Observation::CamStream(CamStream::Idle))
-            .await
-            .unwrap();
+        stream(&handle, CamStream::Idle).await;
 
         time::sleep(Duration::from_secs(30) + 2 * TICK).await;
 
@@ -817,10 +856,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cam_with_a_stream_stays_live_after_30_s() {
         let (handle, outputs) = start_with_live_cam("").await;
-        handle
-            .observe(Observation::CamStream(CamStream::Streaming))
-            .await
-            .unwrap();
+        stream(&handle, CamStream::Streaming).await;
 
         time::sleep(Duration::from_secs(31)).await;
 

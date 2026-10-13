@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use presencemux_api::audio::{self as api, AudioProxy};
-use presencemux_core::{Device, Epoch, MicPermission, PlaneId};
+use presencemux_core::{Epoch, MicPermission, MicReport};
 use zlink::Connection;
 
-use crate::adapter::{Adapter, AdapterError, FIRST_WAIT, Latch, LatchReason, MAX_WAIT, Report};
+use crate::adapter::{Adapter, AdapterError, FIRST_WAIT, Latch, LatchReason, MAX_WAIT, Reply};
 use crate::event_loop::{LEASE, Leased, Owner, REPORT_TIMEOUT, TICK};
 
 // These asserts check the timing rules in `daemon.md`.
@@ -43,11 +43,10 @@ impl Mic {
         }
     }
 
-    /// Returns the report of the audio worker in the types of the daemon.
-    /// Keeps only a latch in the session of the last lease, the session of
-    /// this daemon. Returns an error for a latch with an epoch out of range.
-    /// The gate comes before the audio interface in the devices.
-    fn report(&self, report: &api::Report) -> Result<Report, AdapterError> {
+    /// Returns the reply of the audio worker in the types of the daemon. Keeps
+    /// only a latch in the session of the last lease, the session of this
+    /// daemon. Returns an error for a latch with an epoch out of range.
+    fn reply(&self, report: &api::Report) -> Result<Reply<MicReport>, AdapterError> {
         let latch = report
             .latched
             .filter(|latch| latch.session_usec == self.session)
@@ -55,19 +54,18 @@ impl Mic {
                 let epoch =
                     u32::try_from(latch.epoch).map_err(|_| AdapterError::Invalid("latch epoch"))?;
                 Ok(Latch {
-                    plane: PlaneId::Mic,
                     epoch: Epoch::new(epoch),
                     reason: latch.reason.into(),
                 })
             })
             .transpose()?;
-        Ok(Report {
-            devices: vec![
-                (Device::Gate, report.gate.into()),
-                (Device::AudioInterface, report.interface.into()),
-            ],
+        Ok(Reply {
+            report: MicReport {
+                gate: report.gate.into(),
+                interface: report.interface.into(),
+                latched: latch.map(|latch| latch.epoch),
+            },
             latch,
-            observations: Vec::new(),
         })
     }
 
@@ -84,11 +82,15 @@ impl Mic {
 
 impl Adapter for Mic {
     type Command = Leased<MicPermission>;
+    type Report = MicReport;
 
     const OWNER: Owner = Owner::AudioWorker;
     const TIMEOUT: Duration = Duration::from_millis(500);
 
-    async fn exchange(&mut self, command: Self::Command) -> Result<Report, AdapterError> {
+    async fn exchange(
+        &mut self,
+        command: Self::Command,
+    ) -> Result<Reply<Self::Report>, AdapterError> {
         self.session = command.session.as_micros();
         let lease = lease(command);
         let connection = if let Some(connection) = self.connection.take() {
@@ -105,7 +107,7 @@ impl Adapter for Mic {
             .map_err(transport)?
             .map_err(|api::Error::InvalidLease| AdapterError::Invalid("lease"))?;
         self.log(&renewed.report);
-        self.report(&renewed.report)
+        self.reply(&renewed.report)
     }
 
     fn reset(&mut self) {
@@ -158,6 +160,10 @@ mod tests {
 
     /// The session of the leases in the tests.
     const SESSION: Duration = Duration::from_secs(40);
+    /// [`SESSION`] in microseconds.
+    const SESSION_USEC: i64 = 40_000_000;
+    /// A session before [`SESSION`], in microseconds.
+    const OLDER_SESSION_USEC: i64 = 39_000_000;
 
     /// A scripted reply of the fake audio worker.
     #[derive(Clone, Debug)]
@@ -297,7 +303,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "local")]
-    async fn report_gives_the_status_of_the_gate_then_the_interface() {
+    async fn reply_gives_the_status_of_the_gate_and_the_interface() {
         let dir = tempfile::tempdir().unwrap();
         let reply = api::Report {
             interface: api::DeviceStatus::Missing,
@@ -305,26 +311,23 @@ mod tests {
         };
         let (mut mic, _worker) = start(&dir, vec![Reply::Report(reply)]);
 
-        let report = mic
+        let reply = mic
             .exchange(leased(MicPermission::Denied, 0))
             .await
             .unwrap();
 
         assert_eq!(
-            report.devices,
-            [
-                (Device::Gate, DeviceStatus::Ready),
-                (Device::AudioInterface, DeviceStatus::Missing),
-            ]
+            (reply.report.gate, reply.report.interface),
+            (DeviceStatus::Ready, DeviceStatus::Missing)
         );
     }
 
     #[tokio::test(flavor = "local")]
-    async fn latch_of_this_session_gives_a_latch() {
+    async fn latch_of_this_session_gives_the_latch_for_the_log() {
         let dir = tempfile::tempdir().unwrap();
         let reply = api::Report {
             latched: Some(api::Latch {
-                session_usec: 40_000_000,
+                session_usec: SESSION_USEC,
                 epoch: 2,
                 reason: api::LatchReason::Expired,
             }),
@@ -332,15 +335,14 @@ mod tests {
         };
         let (mut mic, _worker) = start(&dir, vec![Reply::Report(reply)]);
 
-        let report = mic
+        let reply = mic
             .exchange(leased(MicPermission::Permitted, 2))
             .await
             .unwrap();
 
         assert_eq!(
-            report.latch,
+            reply.latch,
             Some(Latch {
-                plane: PlaneId::Mic,
                 epoch: Epoch::new(2),
                 reason: LatchReason::Expired,
             })
@@ -348,11 +350,32 @@ mod tests {
     }
 
     #[tokio::test(flavor = "local")]
+    async fn latch_of_this_session_gives_its_epoch_in_the_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let reply = api::Report {
+            latched: Some(api::Latch {
+                session_usec: SESSION_USEC,
+                epoch: 2,
+                reason: api::LatchReason::Expired,
+            }),
+            ..report()
+        };
+        let (mut mic, _worker) = start(&dir, vec![Reply::Report(reply)]);
+
+        let reply = mic
+            .exchange(leased(MicPermission::Permitted, 2))
+            .await
+            .unwrap();
+
+        assert_eq!(reply.report.latched, Some(Epoch::new(2)));
+    }
+
+    #[tokio::test(flavor = "local")]
     async fn started_latch_gives_the_started_reason() {
         let dir = tempfile::tempdir().unwrap();
         let reply = api::Report {
             latched: Some(api::Latch {
-                session_usec: 40_000_000,
+                session_usec: SESSION_USEC,
                 epoch: 0,
                 reason: api::LatchReason::Started,
             }),
@@ -360,13 +383,13 @@ mod tests {
         };
         let (mut mic, _worker) = start(&dir, vec![Reply::Report(reply)]);
 
-        let report = mic
+        let reply = mic
             .exchange(leased(MicPermission::Denied, 0))
             .await
             .unwrap();
 
         assert_eq!(
-            report.latch.map(|latch| latch.reason),
+            reply.latch.map(|latch| latch.reason),
             Some(LatchReason::Started)
         );
     }
@@ -376,7 +399,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reply = api::Report {
             latched: Some(api::Latch {
-                session_usec: 40_000_000,
+                session_usec: SESSION_USEC,
                 epoch: -1,
                 reason: api::LatchReason::Expired,
             }),
@@ -390,11 +413,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "local")]
-    async fn latch_of_another_session_gives_no_latch() {
+    async fn latch_of_another_session_gives_no_latch_in_the_report() {
         let dir = tempfile::tempdir().unwrap();
         let reply = api::Report {
             latched: Some(api::Latch {
-                session_usec: 39_000_000,
+                session_usec: OLDER_SESSION_USEC,
                 epoch: 2,
                 reason: api::LatchReason::Expired,
             }),
@@ -402,12 +425,12 @@ mod tests {
         };
         let (mut mic, _worker) = start(&dir, vec![Reply::Report(reply)]);
 
-        let report = mic
+        let reply = mic
             .exchange(leased(MicPermission::Permitted, 2))
             .await
             .unwrap();
 
-        assert_eq!(report.latch, None);
+        assert_eq!(reply.report.latched, None);
     }
 
     #[tokio::test(flavor = "local")]
@@ -437,15 +460,12 @@ mod tests {
         mic.reset();
         time::sleep(Duration::from_millis(300)).await;
 
-        let report = mic
+        let reply = mic
             .exchange(leased(MicPermission::Denied, 0))
             .await
             .unwrap();
 
-        assert_eq!(
-            report.devices[1],
-            (Device::AudioInterface, DeviceStatus::Ready)
-        );
+        assert_eq!(reply.report.interface, DeviceStatus::Ready);
     }
 
     #[tokio::test(flavor = "local")]

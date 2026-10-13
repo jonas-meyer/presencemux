@@ -1,6 +1,7 @@
 use presencemux_core::{
-    CamPermission, CamStream, Cause, Command, Controller, Device, DeviceStatus, Epoch, Event,
-    HostStatus, MicMute, Observation, OnAir, PlaneId, PlaneSummary, Preset, SlateId,
+    CamPermission, CamReport, CamStream, Cause, Command, Controller, Device, DeviceStatus, Epoch,
+    Event, HostStatus, MicMute, MicReport, Observation, OnAir, PlaneId, PlaneSummary, Preset,
+    SlateId,
 };
 use proptest::prelude::*;
 use proptest::sample::select;
@@ -33,6 +34,103 @@ pub(crate) fn cause_after_lowering(before: PlaneSummary, cause: Cause) -> Option
 
 pub(crate) fn device() -> impl Strategy<Value = Device> {
     select(&Device::ALL[..])
+}
+
+/// Returns a report of the owner of `device`, with `status` for `device`,
+/// every other device ready, no latch and an idle stream.
+pub(crate) fn report_with(device: Device, status: DeviceStatus) -> Observation {
+    let status_of = |other| {
+        if other == device {
+            status
+        } else {
+            DeviceStatus::Ready
+        }
+    };
+    match device.plane() {
+        PlaneId::Cam => Observation::Cam(CamReport {
+            worker: status_of(Device::CamWorker),
+            camera: status_of(Device::Camera),
+            stream: CamStream::Idle,
+            latched: None,
+        }),
+        PlaneId::Mic => Observation::Mic(MicReport {
+            gate: status_of(Device::Gate),
+            interface: status_of(Device::AudioInterface),
+            latched: None,
+        }),
+    }
+}
+
+/// Returns a report of the owner of the devices of `plane`, with every device
+/// ready, no latch and an idle stream.
+pub(crate) fn ready_report(plane: PlaneId) -> Observation {
+    match plane {
+        PlaneId::Cam => Observation::Cam(CamReport {
+            worker: DeviceStatus::Ready,
+            camera: DeviceStatus::Ready,
+            stream: CamStream::Idle,
+            latched: None,
+        }),
+        PlaneId::Mic => Observation::Mic(MicReport {
+            gate: DeviceStatus::Ready,
+            interface: DeviceStatus::Ready,
+            latched: None,
+        }),
+    }
+}
+
+/// Returns a report of the owner of the devices of `plane`, with every device
+/// ready, an idle stream and a latch at `epoch`.
+pub(crate) fn latched_report(plane: PlaneId, epoch: Epoch) -> Observation {
+    let latched = Some(epoch);
+    match plane {
+        PlaneId::Cam => Observation::Cam(CamReport {
+            worker: DeviceStatus::Ready,
+            camera: DeviceStatus::Ready,
+            stream: CamStream::Idle,
+            latched,
+        }),
+        PlaneId::Mic => Observation::Mic(MicReport {
+            gate: DeviceStatus::Ready,
+            interface: DeviceStatus::Ready,
+            latched,
+        }),
+    }
+}
+
+/// Returns a report of the cam worker with ready devices, no latch and
+/// `stream`.
+pub(crate) fn stream_report(stream: CamStream) -> Observation {
+    Observation::Cam(CamReport {
+        worker: DeviceStatus::Ready,
+        camera: DeviceStatus::Ready,
+        stream,
+        latched: None,
+    })
+}
+
+/// Returns a latch for one report in ten, and no latch for the others.
+fn latched() -> impl Strategy<Value = Option<Epoch>> {
+    proptest::option::weighted(0.1, epoch())
+}
+
+pub(crate) fn cam_report() -> impl Strategy<Value = CamReport> {
+    (device_status(), device_status(), cam_stream(), latched()).prop_map(
+        |(worker, camera, stream, latched)| CamReport {
+            worker,
+            camera,
+            stream,
+            latched,
+        },
+    )
+}
+
+pub(crate) fn mic_report() -> impl Strategy<Value = MicReport> {
+    (device_status(), device_status(), latched()).prop_map(|(gate, interface, latched)| MicReport {
+        gate,
+        interface,
+        latched,
+    })
 }
 
 pub(crate) fn device_status() -> impl Strategy<Value = DeviceStatus> {
@@ -124,10 +222,11 @@ pub(crate) fn preset_without(plane: PlaneId) -> BoxedStrategy<Preset> {
 
 pub(crate) fn observation() -> impl Strategy<Value = Observation> {
     prop_oneof![
-        4 => (device(), device_status()).prop_map(|(d, s)| Observation::Device(d, s)),
+        2 => cam_report().prop_map(Observation::Cam),
+        2 => mic_report().prop_map(Observation::Mic),
+        1 => plane().prop_map(Observation::Lost),
         1 => (plane(), epoch()).prop_map(|(p, e)| Observation::LeaseExpired(p, e)),
         1 => host_status().prop_map(Observation::Host),
-        1 => cam_stream().prop_map(Observation::CamStream),
         1 => epoch().prop_map(Observation::StreamTimeout),
     ]
 }

@@ -18,7 +18,7 @@ pub(crate) fn status(
             desired: slates.cam_value(cam.desired()).to_owned(),
             effective: slates.cam_value(cam.target().permission).to_owned(),
             cause: cam.cause().map(Cause::from),
-            stream: cam.observed().stream.into(),
+            stream: cam.stream().into(),
         },
         mic: MicStatus {
             desired: mic.desired().into(),

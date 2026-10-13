@@ -1,12 +1,17 @@
-use crate::{DeviceStatus, Epoch, Granted, OnAir, Plane, PrivacyPlane};
+use crate::{
+    Device, DeviceStatus, Epoch, Granted, OnAir, Plane, PlaneId, PlaneState, PrivacyPlane, Report,
+    Reported,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cam;
 
 impl Plane for Cam {
     type Desired = CamPermission;
-    type Observed = CamObserved;
+    type Report = CamReport;
     type Target = Granted<CamPermission>;
+
+    const ID: PlaneId = PlaneId::Cam;
 
     const SAFE: Self::Target = Granted {
         permission: CamPermission::Blank,
@@ -30,11 +35,39 @@ impl PrivacyPlane for Cam {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CamObserved {
-    pub camera: DeviceStatus,
+/// A report of the cam worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CamReport {
     pub worker: DeviceStatus,
+    pub camera: DeviceStatus,
     pub stream: CamStream,
+    /// The epoch of the lease at the latch of the worker, if the worker is
+    /// latched.
+    pub latched: Option<Epoch>,
+}
+
+impl Report for CamReport {
+    fn devices(&self) -> [(Device, DeviceStatus); 2] {
+        [
+            (Device::CamWorker, self.worker),
+            (Device::Camera, self.camera),
+        ]
+    }
+
+    fn latched(&self) -> Option<Epoch> {
+        self.latched
+    }
+}
+
+impl PlaneState<Cam> {
+    /// Returns whether the host receives the stream of the cam worker. Without
+    /// a fresh report, the stream counts as idle.
+    pub fn stream(&self) -> CamStream {
+        match self.observed() {
+            Reported::Fresh(report) => report.stream,
+            Reported::Pending | Reported::Lost => CamStream::Idle,
+        }
+    }
 }
 
 /// Whether the host receives the stream of the cam worker.

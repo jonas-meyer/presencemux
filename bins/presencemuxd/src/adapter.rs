@@ -3,7 +3,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use presencemux_core::{Device, DeviceStatus, Epoch, Observation, PlaneId};
+use presencemux_core::{Epoch, Observation};
 use tokio::sync::watch;
 use tokio::time;
 
@@ -19,37 +19,39 @@ pub(crate) trait Adapter {
     /// The command that the adapter sends, for example a lease.
     type Command: Clone;
 
+    /// The report of the owner in the types of core, for example `CamReport`.
+    type Report: Into<Observation>;
+
     /// The owner of the devices.
     const OWNER: Owner;
 
     /// The longest time for one exchange. After it, the exchange fails.
     const TIMEOUT: Duration;
 
-    /// Sends `command` to the owner and returns the report of the owner.
-    async fn exchange(&mut self, command: Self::Command) -> Result<Report, AdapterError>;
+    /// Sends `command` to the owner and returns the reply of the owner.
+    async fn exchange(
+        &mut self,
+        command: Self::Command,
+    ) -> Result<Reply<Self::Report>, AdapterError>;
 
     /// Drops the connection to the owner after a failed or canceled
     /// exchange. The next exchange connects again.
     fn reset(&mut self);
 }
 
-/// The status of the devices of one owner, and its latch.
+/// The report of one owner, and its latch.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Report {
-    pub(crate) devices: Vec<(Device, DeviceStatus)>,
+pub(crate) struct Reply<R> {
+    pub(crate) report: R,
     /// The latch of the owner in the session of this daemon, if the owner is
-    /// latched.
+    /// latched. The report holds its epoch.
     pub(crate) latch: Option<Latch>,
-    /// The other observations of the owner, for example whether the host
-    /// receives the stream.
-    pub(crate) observations: Vec<Observation>,
 }
 
 /// A block of a privacy plane at the owner until a lease with a newer grant
 /// arrives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Latch {
-    pub(crate) plane: PlaneId,
     /// The epoch of the lease at the time of the latch.
     pub(crate) epoch: Epoch,
     pub(crate) reason: LatchReason,
@@ -89,9 +91,9 @@ pub(crate) enum AdapterError {
 }
 
 /// Sends the newest command to the owner, and forwards each report to the
-/// event loop. After a failure, reports the devices of the owner at fault and
-/// sends the newest command again after a growing wait. Finishes each exchange
-/// before it takes a newer command. Returns when the event loop stops.
+/// event loop. After a failure, reports the owner as lost and sends the newest
+/// command again after a growing wait. Finishes each exchange before it takes
+/// a newer command. Returns when the event loop stops.
 pub(crate) async fn drive<A: Adapter>(
     mut commands: watch::Receiver<A::Command>,
     mut adapter: A,
@@ -106,13 +108,14 @@ pub(crate) async fn drive<A: Adapter>(
             Ok(result) => result.map_err(|error| error.to_string()),
             Err(_) => Err(format!("no reply within {} ms", A::TIMEOUT.as_millis())),
         };
-        let observations = match result {
-            Ok(report) => {
+        let observation = match result {
+            Ok(reply) => {
                 backoff.restart();
                 if last_error.take().is_some() {
                     tracing::info!("the {} replies again", A::OWNER);
                 }
-                observations(A::OWNER, report, &mut last_latch)
+                log_latch(A::OWNER, reply.latch, &mut last_latch);
+                reply.report.into()
             }
             Err(message) => {
                 adapter.reset();
@@ -120,10 +123,10 @@ pub(crate) async fn drive<A: Adapter>(
                     tracing::warn!("exchange with the {} failed: {message}", A::OWNER);
                     last_error = Some(message);
                 }
-                A::OWNER.faults()
+                Observation::Lost(A::OWNER.plane())
             }
         };
-        if handle.report(A::OWNER, observations).await.is_err() {
+        if handle.report(A::OWNER, observation).await.is_err() {
             return;
         }
         if last_error.is_some() {
@@ -157,15 +160,9 @@ impl Backoff {
     }
 }
 
-/// Returns the observations of a report of `owner`. Gives `LeaseExpired` only
-/// for a latch that differs from `last_latch`, and updates `last_latch`.
-fn observations(owner: Owner, report: Report, last_latch: &mut Option<Latch>) -> Vec<Observation> {
-    let mut observations: Vec<_> = report
-        .devices
-        .into_iter()
-        .map(|(device, status)| Observation::Device(device, status))
-        .collect();
-    if let Some(latch) = report.latch
+/// Logs `latch` if it differs from `last_latch`, and updates `last_latch`.
+fn log_latch(owner: Owner, latch: Option<Latch>, last_latch: &mut Option<Latch>) {
+    if let Some(latch) = latch
         && *last_latch != Some(latch)
     {
         tracing::info!(
@@ -173,11 +170,8 @@ fn observations(owner: Owner, report: Report, last_latch: &mut Option<Latch>) ->
             latch.reason,
             latch.epoch.get()
         );
-        observations.push(Observation::LeaseExpired(latch.plane, latch.epoch));
     }
-    *last_latch = report.latch;
-    observations.extend(report.observations);
-    observations
+    *last_latch = latch;
 }
 
 #[cfg(test)]
@@ -190,14 +184,15 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::task::spawn_local;
 
+    use presencemux_core::{CamReport, CamStream, DeviceStatus, PlaneId};
+
     use super::*;
     use crate::event_loop::Message;
 
     /// A scripted reply of the fake owner.
     #[derive(Debug)]
-    enum Reply {
+    enum Script {
         Ready,
-        Latched(Latch),
         Error,
         /// A reply after this time.
         Slow(Duration),
@@ -208,28 +203,28 @@ mod tests {
     /// A fake owner that gives the scripted replies, then `Ready`.
     #[derive(Debug)]
     struct Fake {
-        replies: VecDeque<Reply>,
+        replies: VecDeque<Script>,
         sent: Rc<RefCell<Vec<u32>>>,
         resets: Rc<Cell<u32>>,
     }
 
     impl Adapter for Fake {
         type Command = u32;
+        type Report = CamReport;
 
         const OWNER: Owner = Owner::CamWorker;
         const TIMEOUT: Duration = Duration::from_millis(500);
 
-        async fn exchange(&mut self, command: u32) -> Result<Report, AdapterError> {
+        async fn exchange(&mut self, command: u32) -> Result<Reply<CamReport>, AdapterError> {
             self.sent.borrow_mut().push(command);
-            match self.replies.pop_front().unwrap_or(Reply::Ready) {
-                Reply::Ready => Ok(ready_report(None)),
-                Reply::Latched(latch) => Ok(ready_report(Some(latch))),
-                Reply::Error => Err(AdapterError::Invalid("command")),
-                Reply::Slow(wait) => {
+            match self.replies.pop_front().unwrap_or(Script::Ready) {
+                Script::Ready => Ok(ready_reply()),
+                Script::Error => Err(AdapterError::Invalid("command")),
+                Script::Slow(wait) => {
                     time::sleep(wait).await;
-                    Ok(ready_report(None))
+                    Ok(ready_reply())
                 }
-                Reply::Hang => pending().await,
+                Script::Hang => pending().await,
             }
         }
 
@@ -247,54 +242,31 @@ mod tests {
     }
 
     impl Driven {
-        /// Returns the observations of the next report.
-        async fn next_report(&mut self) -> Vec<Observation> {
+        /// Returns the observation of the next report.
+        async fn next_report(&mut self) -> Observation {
             match self.messages.recv().await {
-                Some(Message::Report(_, observations)) => observations,
+                Some(Message::Report(_, observation)) => observation,
                 other => panic!("expected a report, got {other:?}"),
             }
         }
     }
 
-    fn ready_report(latch: Option<Latch>) -> Report {
-        Report {
-            devices: vec![
-                (Device::Camera, DeviceStatus::Ready),
-                (Device::CamWorker, DeviceStatus::Ready),
-            ],
-            latch,
-            observations: Vec::new(),
+    const READY: CamReport = CamReport {
+        worker: DeviceStatus::Ready,
+        camera: DeviceStatus::Ready,
+        stream: CamStream::Idle,
+        latched: None,
+    };
+
+    fn ready_reply() -> Reply<CamReport> {
+        Reply {
+            report: READY,
+            latch: None,
         }
-    }
-
-    fn latch(epoch: u32, reason: LatchReason) -> Latch {
-        Latch {
-            plane: PlaneId::Cam,
-            epoch: Epoch::new(epoch),
-            reason,
-        }
-    }
-
-    fn ready_observations() -> Vec<Observation> {
-        vec![
-            Observation::Device(Device::Camera, DeviceStatus::Ready),
-            Observation::Device(Device::CamWorker, DeviceStatus::Ready),
-        ]
-    }
-
-    fn fault_observations() -> Vec<Observation> {
-        vec![
-            Observation::Device(Device::Camera, DeviceStatus::Fault),
-            Observation::Device(Device::CamWorker, DeviceStatus::Fault),
-        ]
-    }
-
-    fn lease_expired(epoch: u32) -> Observation {
-        Observation::LeaseExpired(PlaneId::Cam, Epoch::new(epoch))
     }
 
     /// Starts `drive` with the command 1 and the scripted `replies`.
-    fn start(replies: Vec<Reply>) -> Driven {
+    fn start(replies: Vec<Script>) -> Driven {
         let (commands, receiver) = watch::channel(1);
         let (handle, messages) = Handle::detached();
         let sent = Rc::default();
@@ -336,37 +308,37 @@ mod tests {
 
     #[tokio::test(flavor = "local", start_paused = true)]
     async fn new_command_does_not_cancel_a_slow_exchange() {
-        let mut driven = start(vec![Reply::Slow(Duration::from_millis(100))]);
+        let mut driven = start(vec![Script::Slow(Duration::from_millis(100))]);
         time::sleep(Duration::from_millis(50)).await;
 
         driven.commands.send_replace(2);
         let first = driven.next_report().await;
         driven.next_report().await;
 
-        assert_eq!(first, ready_observations());
+        assert_eq!(first, Observation::Cam(READY));
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]
-    async fn report_gives_the_status_of_each_device() {
+    async fn report_reaches_the_event_loop_as_one_observation() {
         let mut driven = start(vec![]);
 
-        let report = driven.next_report().await;
+        let observation = driven.next_report().await;
 
-        assert_eq!(report, ready_observations());
+        assert_eq!(observation, Observation::Cam(READY));
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]
-    async fn failed_exchange_reports_each_device_at_fault() {
-        let mut driven = start(vec![Reply::Error]);
+    async fn failed_exchange_reports_the_plane_lost() {
+        let mut driven = start(vec![Script::Error]);
 
-        let report = driven.next_report().await;
+        let observation = driven.next_report().await;
 
-        assert_eq!(report, fault_observations());
+        assert_eq!(observation, Observation::Lost(PlaneId::Cam));
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]
     async fn failed_exchange_resets_the_adapter() {
-        let mut driven = start(vec![Reply::Error]);
+        let mut driven = start(vec![Script::Error]);
 
         driven.next_report().await;
 
@@ -374,18 +346,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]
-    async fn exchange_without_a_reply_reports_each_device_at_fault() {
-        let mut driven = start(vec![Reply::Hang]);
+    async fn exchange_without_a_reply_reports_the_plane_lost() {
+        let mut driven = start(vec![Script::Hang]);
 
-        let report = driven.next_report().await;
+        let observation = driven.next_report().await;
 
-        assert_eq!(report, fault_observations());
+        assert_eq!(observation, Observation::Lost(PlaneId::Cam));
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]
     async fn exchange_without_a_reply_fails_after_500_ms() {
         let before = time::Instant::now();
-        let mut driven = start(vec![Reply::Hang]);
+        let mut driven = start(vec![Script::Hang]);
 
         driven.next_report().await;
 
@@ -394,7 +366,7 @@ mod tests {
 
     #[tokio::test(flavor = "local", start_paused = true)]
     async fn exchange_without_a_reply_resets_the_adapter() {
-        let mut driven = start(vec![Reply::Hang]);
+        let mut driven = start(vec![Script::Hang]);
 
         driven.next_report().await;
 
@@ -403,7 +375,7 @@ mod tests {
 
     #[tokio::test(flavor = "local", start_paused = true)]
     async fn failed_exchange_sends_the_newest_command_again_after_50_ms() {
-        let mut driven = start(vec![Reply::Error]);
+        let mut driven = start(vec![Script::Error]);
         driven.next_report().await;
         driven.commands.send_replace(2);
 
@@ -412,59 +384,6 @@ mod tests {
 
         assert_eq!(before.elapsed(), Duration::from_millis(50));
         assert_eq!(*driven.sent.borrow(), [1, 2]);
-    }
-
-    #[tokio::test(flavor = "local", start_paused = true)]
-    async fn same_latch_in_the_next_report_gives_no_lease_expired() {
-        let expired = latch(3, LatchReason::Expired);
-        let mut driven = start(vec![Reply::Latched(expired), Reply::Latched(expired)]);
-        driven.next_report().await;
-
-        driven.commands.send_replace(2);
-        let second = driven.next_report().await;
-
-        assert!(!second.contains(&lease_expired(3)));
-    }
-
-    #[tokio::test(flavor = "local", start_paused = true)]
-    async fn first_report_of_a_latch_gives_lease_expired() {
-        let mut driven = start(vec![Reply::Latched(latch(3, LatchReason::Expired))]);
-
-        let report = driven.next_report().await;
-
-        assert!(report.contains(&lease_expired(3)));
-    }
-
-    #[tokio::test(flavor = "local", start_paused = true)]
-    async fn new_latch_reason_gives_lease_expired_again() {
-        let mut driven = start(vec![
-            Reply::Latched(latch(3, LatchReason::Stalled)),
-            Reply::Latched(latch(3, LatchReason::Expired)),
-        ]);
-        driven.next_report().await;
-
-        driven.commands.send_replace(2);
-        let second = driven.next_report().await;
-
-        assert!(second.contains(&lease_expired(3)));
-    }
-
-    #[tokio::test(flavor = "local", start_paused = true)]
-    async fn latch_after_a_report_without_a_latch_gives_lease_expired_again() {
-        let expired = latch(3, LatchReason::Expired);
-        let mut driven = start(vec![
-            Reply::Latched(expired),
-            Reply::Ready,
-            Reply::Latched(expired),
-        ]);
-        driven.next_report().await;
-        driven.commands.send_replace(2);
-        driven.next_report().await;
-
-        driven.commands.send_replace(3);
-        let third = driven.next_report().await;
-
-        assert!(third.contains(&lease_expired(3)));
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]

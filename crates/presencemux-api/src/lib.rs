@@ -118,8 +118,12 @@ pub enum Health {
 pub enum Cause {
     CameraFault,
     CamWorkerFault,
+    /// The daemon has no contact with the cam worker.
+    CamWorkerLost,
     AudioInterfaceFault,
     GateFault,
+    /// The daemon has no contact with the audio worker.
+    AudioWorkerLost,
     ControllerStalled,
     HostDisconnected,
     HostSuspended,
@@ -227,8 +231,10 @@ impl fmt::Display for Cause {
         f.pad(match self {
             Self::CameraFault => "camera_fault",
             Self::CamWorkerFault => "cam_worker_fault",
+            Self::CamWorkerLost => "cam_worker_lost",
             Self::AudioInterfaceFault => "audio_interface_fault",
             Self::GateFault => "gate_fault",
+            Self::AudioWorkerLost => "audio_worker_lost",
             Self::ControllerStalled => "controller_stalled",
             Self::HostDisconnected => "host_disconnected",
             Self::HostSuspended => "host_suspended",
@@ -294,6 +300,8 @@ impl From<controller::Cause> for Cause {
                 Self::AudioInterfaceFault
             }
             controller::Cause::DeviceFault(controller::Device::Gate) => Self::GateFault,
+            controller::Cause::OwnerLost(controller::PlaneId::Cam) => Self::CamWorkerLost,
+            controller::Cause::OwnerLost(controller::PlaneId::Mic) => Self::AudioWorkerLost,
             controller::Cause::ControllerStalled => Self::ControllerStalled,
             controller::Cause::Host(controller::HostStatus::Disconnected) => Self::HostDisconnected,
             controller::Cause::Host(controller::HostStatus::Suspended) => Self::HostSuspended,
