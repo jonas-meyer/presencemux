@@ -86,7 +86,7 @@ pub(crate) struct Request {
     pub(crate) name: Option<PresetRef>,
 }
 
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum HandleError {
     #[error("the event loop is busy")]
     Busy,
@@ -148,6 +148,8 @@ struct LastReport {
 #[derive(Debug)]
 pub(crate) enum Message {
     Request(Request, oneshot::Sender<()>),
+    /// A resume of the plane, from the user.
+    Resume(PlaneId, oneshot::Sender<()>),
     /// The observation of one report of an owner, or `Lost` after a failed
     /// exchange, and the message of the owner.
     Report(Owner, Observation, Option<String>),
@@ -164,12 +166,28 @@ struct Clock {
 }
 
 impl Handle {
-    /// Sends a request and waits until the event loop handles it. It
-    /// returns [`HandleError::Busy`] at once if the channel is full.
+    /// Sends a request and waits until the event loop handles it. Returns
+    /// [`HandleError::Busy`] at once if the channel is full.
     pub(crate) async fn request(&self, request: Request) -> Result<(), HandleError> {
+        self.send_command(|done| Message::Request(request, done))
+            .await
+    }
+
+    /// Sends a resume of `plane` and waits until the event loop handles it.
+    /// Returns [`HandleError::Busy`] at once if the channel is full.
+    pub(crate) async fn resume(&self, plane: PlaneId) -> Result<(), HandleError> {
+        self.send_command(|done| Message::Resume(plane, done)).await
+    }
+
+    /// Sends `message` with a reply channel, and waits until the event loop
+    /// handles it.
+    async fn send_command(
+        &self,
+        message: impl FnOnce(oneshot::Sender<()>) -> Message,
+    ) -> Result<(), HandleError> {
         let (done, handled) = oneshot::channel();
         self.0
-            .try_send(Message::Request(request, done))
+            .try_send(message(done))
             .map_err(|error| match error {
                 TrySendError::Full(_) => HandleError::Busy,
                 TrySendError::Closed(_) => HandleError::Stopped,
@@ -294,6 +312,12 @@ impl EventLoop {
                 }
                 self.preset = name;
                 self.apply(Command::Apply(preset).into());
+                self.publish();
+                let _ = done.send(());
+            }
+            Message::Resume(plane, done) => {
+                tracing::info!("request: resume {plane:?}");
+                self.apply(Command::Resume(plane).into());
                 self.publish();
                 let _ = done.send(());
             }
@@ -480,7 +504,9 @@ impl Clock {
 #[cfg(test)]
 mod tests {
     use presencemux_api::{Cause, Health, Mute};
-    use presencemux_core::{CamOutput, CamReport, DeviceStatus, MicMute, MicOutput, MicReport};
+    use presencemux_core::{
+        CamOutput, CamReport, DeviceStatus, HostStatus, MicMute, MicOutput, MicReport,
+    };
 
     use super::*;
 
@@ -564,6 +590,30 @@ mod tests {
     /// task waits.
     async fn settle() {
         time::sleep(Duration::from_millis(10)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_after_a_cleared_fault_grants_the_mic_again() {
+        let (_, handle, outputs) = start("");
+        handle
+            .observe(Observation::Host(HostStatus::Connected))
+            .await
+            .unwrap();
+        ready(&handle, &PlaneId::ALL).await;
+        handle.request(mic(MicMute::Unmuted)).await.unwrap();
+        let fault = MicReport {
+            interface: DeviceStatus::Fault,
+            ..MIC_READY
+        };
+        handle.observe(Observation::Mic(fault)).await.unwrap();
+        ready(&handle, &[PlaneId::Mic]).await;
+
+        handle.resume(PlaneId::Mic).await.unwrap();
+
+        assert_eq!(
+            outputs.mic.borrow().granted.permission,
+            MicPermission::Permitted
+        );
     }
 
     #[tokio::test(start_paused = true)]

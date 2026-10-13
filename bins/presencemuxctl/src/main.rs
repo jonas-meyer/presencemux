@@ -7,8 +7,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use presencemux_api::{
-    Cause, ControllerProxy, Device, Owner, OwnerStatus, PRESET_PRIVACY, ReportState, SOCKET_PATH,
-    Status,
+    Cause, ControllerProxy, Device, Owner, OwnerStatus, PRESET_PRIVACY, Plane, ReportState,
+    SOCKET_PATH, Status,
 };
 use rustix::time::{ClockId, clock_gettime};
 use tokio_stream::StreamExt;
@@ -36,8 +36,16 @@ enum Command {
     Cam { value: String },
     /// Mutes or unmutes the mic.
     Mic { state: MicState },
+    /// Applies the request of a held plane again.
+    Resume { plane: PlaneArg },
     /// Lists the presets.
     Presets,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum PlaneArg {
+    Cam,
+    Mic,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -138,6 +146,13 @@ async fn run(cli: Cli) -> Result<(), Error> {
         Command::Cam { value } => connection.set_cam(&value).await?.map_err(naming(&value))?,
         Command::Mic { state } => {
             connection.set_mic_mute(state == MicState::Muted).await??;
+        }
+        Command::Resume { plane } => {
+            let plane = match plane {
+                PlaneArg::Cam => Plane::Cam,
+                PlaneArg::Mic => Plane::Mic,
+            };
+            connection.resume(plane).await??;
         }
         Command::Presets => {
             writeln!(out, "{PRESET_PRIVACY}")?;

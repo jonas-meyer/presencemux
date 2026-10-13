@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use presencemux_api::{
     CamStatus, CamStream, Cause, Device, DeviceCondition, DeviceStatus, Error, Health, Host,
-    MicOutput, MicStatus, Mute, Owner, OwnerStatus, Permission, Presets, ReportState, Status,
+    MicOutput, MicStatus, Mute, Owner, OwnerStatus, Permission, Plane, Presets, ReportState,
+    Status,
 };
 use presencemux_core::{MicMute, Preset};
 use rustix::io::Errno;
@@ -105,13 +106,15 @@ impl Service {
     }
 
     async fn request(&self, request: Request) -> Result<(), Error> {
-        self.handle
-            .request(request)
-            .await
-            .map_err(|error| match error {
-                HandleError::Busy => Error::TooManyRequests,
-                HandleError::Stopped => Error::NotAvailable,
-            })
+        self.handle.request(request).await.map_err(wire_error)
+    }
+}
+
+/// Returns `error` as the error of the interface.
+fn wire_error(error: HandleError) -> Error {
+    match error {
+        HandleError::Busy => Error::TooManyRequests,
+        HandleError::Stopped => Error::NotAvailable,
     }
 }
 
@@ -140,6 +143,7 @@ impl Service {
         DeviceStatus,
         Mute,
         Permission,
+        Plane,
         Host,
         Health,
         Cause
@@ -205,6 +209,12 @@ impl Service {
         .await
     }
 
+    /// Applies the request of a held plane again. The devices of the plane must
+    /// be ready, and the host must be connected. Otherwise it does nothing.
+    async fn resume(&self, plane: Plane) -> Result<(), Error> {
+        self.handle.resume(plane.into()).await.map_err(wire_error)
+    }
+
     /// Returns the names of the configured presets. The list does not include
     /// the built-in `privacy`.
     async fn list_presets(&self) -> Presets {
@@ -263,6 +273,17 @@ mod tests {
 
         let status = client.describe().await.unwrap().unwrap();
         assert_eq!(status.mic.requested, Mute::Unmuted);
+    }
+
+    #[tokio::test(flavor = "local", start_paused = true)]
+    async fn resume_without_a_hold_keeps_the_status() {
+        let service = start("");
+        let mut client = connect(&service);
+        let before = client.describe().await.unwrap().unwrap();
+
+        client.resume(Plane::Cam).await.unwrap().unwrap();
+
+        assert_eq!(client.describe().await.unwrap().unwrap(), before);
     }
 
     #[tokio::test(flavor = "local", start_paused = true)]

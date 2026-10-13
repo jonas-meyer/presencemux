@@ -345,6 +345,7 @@ pub(crate) fn cam_stream() -> impl Strategy<Value = CamStream> {
 pub(crate) fn event() -> impl Strategy<Value = Event> {
     prop_oneof![
         1 => preset().prop_map(|p| Command::Apply(p).into()),
+        1 => plane().prop_map(|p| Command::Resume(p).into()),
         3 => observation().prop_map(Event::from),
     ]
 }

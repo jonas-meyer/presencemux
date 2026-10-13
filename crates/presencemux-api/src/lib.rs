@@ -132,6 +132,15 @@ pub struct OwnerStatus {
     pub message: Option<String>,
 }
 
+/// A privacy plane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
+#[serde(rename_all = "snake_case")]
+#[zlink(rename_all = "snake_case")]
+pub enum Plane {
+    Cam,
+    Mic,
+}
+
 /// A worker that owns devices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, CustomType)]
 #[serde(rename_all = "snake_case")]
@@ -287,6 +296,7 @@ pub trait ControllerProxy {
     async fn apply_preset(&mut self, name: &str) -> zlink::Result<Result<(), Error>>;
     async fn set_cam(&mut self, cam: &str) -> zlink::Result<Result<(), Error>>;
     async fn set_mic_mute(&mut self, muted: bool) -> zlink::Result<Result<(), Error>>;
+    async fn resume(&mut self, plane: Plane) -> zlink::Result<Result<(), Error>>;
     async fn list_presets(&mut self) -> zlink::Result<Result<Presets, Error>>;
 }
 
@@ -419,6 +429,15 @@ impl fmt::Display for Cause {
             Self::HostConnected => "host_connected",
             Self::StreamStopped => "stream_stopped",
         })
+    }
+}
+
+impl From<Plane> for controller::PlaneId {
+    fn from(plane: Plane) -> Self {
+        match plane {
+            Plane::Cam => Self::Cam,
+            Plane::Mic => Self::Mic,
+        }
     }
 }
 

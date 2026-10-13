@@ -10,5 +10,6 @@ mod lost;
 mod observation;
 mod policy;
 mod request;
+mod resume;
 mod stream_timeout;
 mod support;

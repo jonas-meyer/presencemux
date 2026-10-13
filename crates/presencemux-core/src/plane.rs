@@ -169,6 +169,12 @@ impl<P: Plane> PlaneState<P> {
         self.hold = None;
     }
 
+    /// Clears the hold, and applies the request again in `epoch`.
+    pub(crate) fn resume(&mut self, epoch: Epoch) {
+        self.epoch = epoch;
+        self.hold = None;
+    }
+
     /// Holds the plane at the safe value. Sets the hold only if the desired
     /// value changes.
     pub(crate) fn lower(&mut self, cause: Cause) {

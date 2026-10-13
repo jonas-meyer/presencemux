@@ -33,6 +33,10 @@ pub enum Event {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Apply(Preset),
+    /// Applies the request of a held plane again. Acts only while the plane
+    /// has a hold, the health of its owner is `Ready` and the host is
+    /// connected.
+    Resume(PlaneId),
 }
 
 /// An input from automation.
@@ -118,6 +122,7 @@ impl Controller {
         let before = self.clone();
         match event {
             Event::Command(Command::Apply(preset)) => self.apply(preset),
+            Event::Command(Command::Resume(plane)) => self.resume(plane),
             Event::Observation(Observation::Cam(report)) => {
                 self.cam.observe(Reported::Fresh(report));
             }
@@ -203,6 +208,13 @@ impl Controller {
         }
     }
 
+    fn resume(&mut self, plane: PlaneId) {
+        match plane {
+            PlaneId::Cam => resume(&mut self.cam, self.host, &mut self.epoch),
+            PlaneId::Mic => resume(&mut self.mic, self.host, &mut self.epoch),
+        }
+    }
+
     /// Returns the epoch of the last command that set the plane.
     pub fn granted(&self, plane: PlaneId) -> Epoch {
         match plane {
@@ -225,6 +237,15 @@ impl Controller {
             PlaneId::Cam => self.cam.lower(cause),
             PlaneId::Mic => self.mic.lower(cause),
         }
+    }
+}
+
+/// Resumes `plane` if [`policy::resumes`] permits it. The resume takes the
+/// epoch after `epoch`.
+fn resume<P: PrivacyPlane>(plane: &mut PlaneState<P>, host: HostStatus, epoch: &mut Epoch) {
+    if policy::resumes(plane, host) {
+        *epoch = epoch.next();
+        plane.resume(*epoch);
     }
 }
 
@@ -279,6 +300,98 @@ mod tests {
             Observation::Mic(mic(Ready, Ready)).into(),
             live(),
         ])
+    }
+
+    /// Returns a controller with a connected host and both planes live, whose
+    /// camera had a fault and is ready again. The cam plane has the hold
+    /// `DeviceFault(Camera)`, and the mic plane has no hold.
+    fn held_controller() -> Controller {
+        after(&[
+            Observation::Host(HostStatus::Connected).into(),
+            Observation::Cam(cam(Ready, Ready)).into(),
+            Observation::Mic(mic(Ready, Ready)).into(),
+            live(),
+            Observation::Cam(cam(Ready, Fault)).into(),
+            Observation::Cam(cam(Ready, Ready)).into(),
+        ])
+    }
+
+    #[test]
+    fn resume_after_the_fault_clears_grants_the_request_again() {
+        let mut controller = held_controller();
+
+        let _ = controller.handle_input(Command::Resume(PlaneId::Cam).into());
+
+        assert_eq!(controller.cam().target().permission, CamPermission::Live);
+    }
+
+    #[test]
+    fn resume_clears_the_hold() {
+        let mut controller = held_controller();
+
+        let _ = controller.handle_input(Command::Resume(PlaneId::Cam).into());
+
+        assert_eq!(controller.cam().hold(), None);
+    }
+
+    #[test]
+    fn resume_while_the_camera_is_missing_keeps_the_hold() {
+        let mut controller = held_controller();
+        let _ = controller.handle_input(Observation::Cam(cam(Ready, Missing)).into());
+
+        let _ = controller.handle_input(Command::Resume(PlaneId::Cam).into());
+
+        assert_eq!(
+            controller.cam().hold(),
+            Some(Cause::DeviceFault(Device::Camera))
+        );
+    }
+
+    #[test]
+    fn resume_while_the_host_is_suspended_keeps_the_hold() {
+        let mut controller = held_controller();
+        let _ = controller.handle_input(Observation::Host(HostStatus::Suspended).into());
+
+        let _ = controller.handle_input(Command::Resume(PlaneId::Mic).into());
+
+        assert_eq!(
+            controller.mic().hold(),
+            Some(Cause::Host(HostStatus::Suspended))
+        );
+    }
+
+    #[test]
+    fn resume_grants_the_request_in_a_new_epoch() {
+        let mut controller = held_controller();
+        let before = controller.epoch();
+
+        let _ = controller.handle_input(Command::Resume(PlaneId::Cam).into());
+
+        assert_eq!(controller.cam().target().epoch, before.next());
+    }
+
+    #[test]
+    fn resume_of_the_mic_without_a_hold_keeps_the_epoch() {
+        let mut controller = held_controller();
+        let before = controller.epoch();
+
+        let _ = controller.handle_input(Command::Resume(PlaneId::Mic).into());
+
+        assert_eq!(controller.epoch(), before);
+    }
+
+    #[test]
+    fn resume_of_one_plane_keeps_the_hold_of_the_other() {
+        let mut controller = held_controller();
+        let _ = controller.handle_input(Observation::Mic(mic(Ready, Fault)).into());
+        let _ = controller.handle_input(Observation::Mic(mic(Ready, Ready)).into());
+
+        let _ = controller.handle_input(Command::Resume(PlaneId::Cam).into());
+
+        assert_eq!(
+            controller.mic().hold(),
+            Some(Cause::DeviceFault(Device::AudioInterface))
+        );
     }
 
     #[test]

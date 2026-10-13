@@ -90,6 +90,15 @@ fn device_lowers(before: DeviceStatus, after: DeviceStatus) -> bool {
 }
 
 /// Returns `true` if the host is no longer connected. A suspend counts too.
+/// Returns `true` if a resume applies the request of `plane` again. The plane
+/// must have a hold, the health of its owner must be `Ready`, and the host
+/// must be connected.
+pub(crate) fn resumes<P: PrivacyPlane>(plane: &PlaneState<P>, host: HostStatus) -> bool {
+    plane.hold.is_some()
+        && health::<P>(&plane.observed) == Health::Ready
+        && host == HostStatus::Connected
+}
+
 pub(crate) fn host_lowers(before: HostStatus, after: HostStatus) -> bool {
     before == HostStatus::Connected && after != HostStatus::Connected
 }
