@@ -19,7 +19,11 @@ section = "video"
 depends = "$auto, systemd (>= 257)"
 conflicts = "rpi-usb-gadget"
 maintainer-scripts = "debian/"
-assets = [["target/release/presencemux-gadget", "usr/bin/", "755"]]
+assets = [
+    ["target/release/presencemux-gadget", "usr/bin/", "755"],
+    ["debian/reserve-cpu.conf", "usr/lib/systemd/system/system.slice.d/presencemux-gadget.conf", "644"],
+    ["debian/reserve-cpu.conf", "usr/lib/systemd/system/user.slice.d/presencemux-gadget.conf", "644"],
+]
 systemd-units = { enable = true, start = true, restart-after-upgrade = false, stop-on-upgrade = false }
 
 [dependencies]

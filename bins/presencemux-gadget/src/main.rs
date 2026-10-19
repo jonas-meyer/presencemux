@@ -2,6 +2,7 @@
 
 mod configfs;
 mod gadget;
+mod interrupt;
 
 use std::fs;
 use std::io::{self, Write};
@@ -18,6 +19,7 @@ const GADGET: &str = "/sys/kernel/config/usb_gadget/presencemux";
 const GADGETS: &str = "/sys/kernel/config/usb_gadget";
 const UDCS: &str = "/sys/class/udc";
 const SERIAL_NUMBER: &str = "/proc/device-tree/serial-number";
+const INTERRUPTS: &str = "/proc/interrupts";
 
 /// Creates or removes the USB gadget of PresenceMux.
 #[derive(Debug, Parser)]
@@ -96,25 +98,18 @@ fn run(cli: &Cli) -> Result<(), Error> {
     let mut out = io::stdout().lock();
     match cli.command {
         Command::Up => {
-            if root.exists() {
+            let udc = if root.exists() {
                 let udc = configfs::bound_udc(root)
                     .map_err(Error::ReadUdc)?
                     .ok_or(Error::NotBound)?;
-                return writeln!(out, "the gadget exists and is bound to {udc}")
-                    .map_err(Error::Output);
-            }
-            if !Path::new(GADGETS).is_dir() {
-                return Err(Error::NoConfigfs);
-            }
-            let udc = first_udc().map_err(Error::Udcs)?.ok_or(Error::NoUdc)?;
-            let ops = gadget::plan(&serial_number()?);
-            configfs::apply(root, &ops)
-                .map_err(|ApplyError { error, undo }| Error::Create(error).with_undo(undo))?;
-            if let Err(source) = configfs::bind(root, &udc) {
-                let undo = configfs::undo(root, &ops).err();
-                return Err(Error::Bind { udc, source }.with_undo(undo));
-            }
-            writeln!(out, "bound to {udc}").map_err(Error::Output)
+                writeln!(out, "the gadget exists and is bound to {udc}").map_err(Error::Output)?;
+                udc
+            } else {
+                let udc = create(root)?;
+                writeln!(out, "bound to {udc}").map_err(Error::Output)?;
+                udc
+            };
+            move_interrupts(&mut out, &udc).map_err(Error::Output)
         }
         Command::Down => {
             if !root.exists() {
@@ -132,6 +127,23 @@ fn run(cli: &Cli) -> Result<(), Error> {
     }
 }
 
+/// Creates the gadget in `root`, binds it to the first UDC and returns the name
+/// of the UDC. Removes the partial gadget on an error.
+fn create(root: &Path) -> Result<String, Error> {
+    if !Path::new(GADGETS).is_dir() {
+        return Err(Error::NoConfigfs);
+    }
+    let udc = first_udc().map_err(Error::Udcs)?.ok_or(Error::NoUdc)?;
+    let ops = gadget::plan(&serial_number()?);
+    configfs::apply(root, &ops)
+        .map_err(|ApplyError { error, undo }| Error::Create(error).with_undo(undo))?;
+    if let Err(source) = configfs::bind(root, &udc) {
+        let undo = configfs::undo(root, &ops).err();
+        return Err(Error::Bind { udc, source }.with_undo(undo));
+    }
+    Ok(udc)
+}
+
 /// Returns the name of the first UDC, if one exists.
 fn first_udc() -> io::Result<Option<String>> {
     let mut names = fs::read_dir(UDCS)?
@@ -139,6 +151,35 @@ fn first_udc() -> io::Result<Option<String>> {
         .collect::<io::Result<Vec<_>>>()?;
     names.sort();
     Ok(names.into_iter().next())
+}
+
+/// Moves the interrupts of the UDC to `interrupt::CPU`. The gadget works
+/// without it, so an error is only a warning.
+fn move_interrupts(out: &mut impl Write, udc: &str) -> io::Result<()> {
+    let result = fs::read_to_string(INTERRUPTS).and_then(|interrupts| {
+        let numbers = interrupt::of_device(&interrupts, udc);
+        for number in &numbers {
+            let path = format!("/proc/irq/{number}/smp_affinity_list");
+            fs::write(&path, interrupt::CPU.to_string())
+                .map_err(|error| io::Error::new(error.kind(), format!("{path}: {error}")))?;
+        }
+        Ok(numbers)
+    });
+    match result {
+        Ok(numbers) if numbers.is_empty() => {
+            writeln!(out, "warning: {INTERRUPTS} has no interrupt of {udc}")
+        }
+        Ok(numbers) => writeln!(
+            out,
+            "moved the interrupts {numbers:?} of {udc} to CPU {}",
+            interrupt::CPU
+        ),
+        Err(error) => writeln!(
+            out,
+            "warning: cannot move the interrupts of {udc} to CPU {}: {error}",
+            interrupt::CPU
+        ),
+    }
 }
 
 /// Returns the serial number of the Raspberry Pi. The host identifies the

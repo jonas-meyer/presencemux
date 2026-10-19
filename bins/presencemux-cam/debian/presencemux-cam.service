@@ -22,7 +22,6 @@ TimeoutStartSec=5s
 TimeoutStartFailureMode=kill
 TimeoutStopSec=2s
 Nice=-10
-CPUAffinity=1-3
 
 DevicePolicy=closed
 DeviceAllow=char-video4linux rw
