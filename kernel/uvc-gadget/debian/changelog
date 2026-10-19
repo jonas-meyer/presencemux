@@ -1,0 +1,5 @@
+presencemux-uvc (0.1.0) trixie; urgency=medium
+
+  * Handle -ENODATA from dwc2 as a missed isochronous transfer.
+
+ -- Jonas Meyer-Ohle <19151471+jonas-meyer@users.noreply.github.com>  Thu, 15 Oct 2026 18:14:29 +0100

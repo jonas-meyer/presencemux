@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0
+# The usb_f_uvc lines of drivers/usb/gadget/function/Makefile.
+obj-m := usb_f_uvc.o
+usb_f_uvc-y := f_uvc.o uvc_queue.o uvc_v4l2.o uvc_video.o uvc_configfs.o
+ifneq ($(CONFIG_TRACING),)
+  CFLAGS_uvc_trace.o := -I$(src)
+  usb_f_uvc-y += uvc_trace.o
+endif

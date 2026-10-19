@@ -1,0 +1,4 @@
+# dpkg-buildpackage writes its results next to the source directory.
+/*.deb
+/*.buildinfo
+/*.changes

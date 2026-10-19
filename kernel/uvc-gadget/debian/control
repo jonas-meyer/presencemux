@@ -1,0 +1,20 @@
+Source: presencemux-uvc
+Section: kernel
+Priority: optional
+Maintainer: Jonas Meyer-Ohle <19151471+jonas-meyer@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13), dh-sequence-dkms
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/jonas-meyer/presencemux
+
+Package: presencemux-uvc-dkms
+Architecture: all
+Depends: ${misc:Depends}
+Description: UVC gadget function of PresenceMux with dwc2 missed-transfer handling
+ The usb_f_uvc module of the Raspberry Pi kernel 6.18.50+rpt-rpi-2712, with
+ one patch: a missed isochronous transfer on dwc2 (-ENODATA) drops the cut
+ frame, like -EXDEV on dwc3. The stock module cancels the whole queue, and
+ the host shows a torn frame.
+ .
+ DKMS builds the module only for that kernel. On another kernel, the stock
+ module loads.

@@ -1,0 +1,28 @@
+From: Jonas Meyer-Ohle <19151471+jonas-meyer@users.noreply.github.com>
+Subject: [PATCH] usb: gadget: uvc: treat -ENODATA as a missed isochronous
+ transfer
+
+dwc2 completes an isochronous request whose target microframe has passed
+with -ENODATA. dwc3 uses -EXDEV for the same case. uvc_video_complete()
+handles only -EXDEV as a missed transfer. Any other status cancels the
+whole queue with uvcg_queue_cancel().
+
+On dwc2, a single late interrupt then cuts the frame on the bus without
+UVC_STREAM_ERR, and the host shows a torn frame. The following buffers
+are returned with an error too. With -EXDEV handling, the remaining
+packets of the frame carry UVC_STREAM_ERR, and the host drops only that
+frame.
+
+Handle -ENODATA like -EXDEV.
+
+---
+--- a/uvc_video.c
++++ b/uvc_video.c
+@@ -359,6 +359,7 @@
+ 		break;
+ 
+ 	case -EXDEV:
++	case -ENODATA:	/* dwc2: the target microframe has passed. */
+ 		uvcg_dbg(&video->uvc->func, "VS request missed xfer.\n");
+ 		if (req->length != 0)
+ 			queue->flags |= UVC_QUEUE_DROP_INCOMPLETE;
