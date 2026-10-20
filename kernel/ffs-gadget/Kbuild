@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
+# The usb_f_fs lines of drivers/usb/gadget/function/Makefile.
+obj-m := usb_f_fs.o
+usb_f_fs-y := f_fs.o

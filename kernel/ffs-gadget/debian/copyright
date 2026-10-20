@@ -1,0 +1,33 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: usb_f_fs (Linux kernel)
+Source: https://github.com/raspberrypi/linux/tree/cff533aec2fa601846766b32ff57204e0a61bed7/drivers/usb/gadget
+
+Files: *.c *.h
+Copyright: 2003-2004 David Brownell
+           2003 Agilent Technologies
+           2010-2014 Samsung Electronics Co., Ltd.
+           the Linux kernel contributors
+License: GPL-2.0 and GPL-2.0+
+Comment: Unchanged copies from the Raspberry Pi kernel. Each file has its
+ SPDX identifier.
+
+Files: Kbuild dkms.conf patches/* debian/* README.md
+Copyright: 2026 Jonas Meyer-Ohle
+License: GPL-2.0
+
+License: GPL-2.0
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of the GNU General Public License version 2 as published by
+ the Free Software Foundation.
+ .
+ On Debian systems, the full text of the GNU General Public License version 2
+ is in /usr/share/common-licenses/GPL-2.
+
+License: GPL-2.0+
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of the GNU General Public License as published by the Free
+ Software Foundation; either version 2 of the License, or (at your option)
+ any later version.
+ .
+ On Debian systems, the full text of the GNU General Public License version 2
+ is in /usr/share/common-licenses/GPL-2.

@@ -1,0 +1,20 @@
+Source: presencemux-ffs
+Section: kernel
+Priority: optional
+Maintainer: Jonas Meyer-Ohle <19151471+jonas-meyer@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13), dh-sequence-dkms
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/jonas-meyer/presencemux
+
+Package: presencemux-ffs-dkms
+Architecture: all
+Depends: ${misc:Depends}
+Description: FunctionFS of PresenceMux with USB Video Class descriptors
+ The usb_f_fs module of the Raspberry Pi kernel 6.18.50+rpt-rpi-2712, with
+ one patch: FunctionFS accepts the class-specific descriptors of the video
+ class. The cam worker of PresenceMux then implements the USB camera
+ function in userspace, with a bulk endpoint.
+ .
+ DKMS builds the module only for that kernel. On another kernel, the stock
+ module loads and rejects the camera descriptors.

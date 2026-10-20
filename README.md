@@ -23,9 +23,11 @@ crates/presencemux-api    Varlink API types, shared by the daemon and its client
 bins/presencemuxd         daemon that runs the controller on the Pi
 bins/presencemuxctl       command-line client for the daemon
 kernel/uvc-gadget         patched usb_f_uvc kernel module (GPL-2.0, DKMS)
+kernel/ffs-gadget         patched usb_f_fs kernel module (GPL-2.0, DKMS)
 ```
 
 ## License
 
-MIT. See [LICENSE](LICENSE). `kernel/uvc-gadget/` is GPL-2.0, because it is
-a patched Linux kernel module. See its `debian/copyright`.
+MIT. See [LICENSE](LICENSE). `kernel/uvc-gadget/` and `kernel/ffs-gadget/` are
+GPL-2.0, because they are patched Linux kernel modules. See their
+`debian/copyright`.

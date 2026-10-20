@@ -1,0 +1,36 @@
+From: Jonas Meyer-Ohle <19151471+jonas-meyer@users.noreply.github.com>
+Subject: [PATCH] usb: gadget: f_fs: accept video class-specific descriptors
+
+ffs_do_single_desc() accepts class-specific descriptors only for HID,
+CCID and DFU. A USB Video Class function needs CS_INTERFACE descriptors
+(video control header, terminals, video streaming header, formats and
+frames) and can have CS_ENDPOINT descriptors. f_fs rejects them with
+-EINVAL, so userspace cannot implement a UVC function with FunctionFS.
+
+Accept CS_INTERFACE and CS_ENDPOINT descriptors when the most recent
+interface descriptor has the video class.
+
+f_fs does not renumber the interface numbers and endpoint addresses in
+these descriptors (baInterfaceNr of the video control header and
+bEndpointAddress of the video streaming header). Userspace must write the
+final values.
+
+---
+--- a/f_fs.c
++++ b/f_fs.c
+@@ -2579,6 +2579,15 @@
+ 			return -EINVAL;
+ 		}
+ 
++	case USB_DT_CS_INTERFACE:
++	case USB_DT_CS_ENDPOINT:
++		if (*current_class != USB_CLASS_VIDEO) {
++			pr_vdebug("unknown descriptor: %d for class %d\n",
++				  _ds->bDescriptorType, *current_class);
++			return -EINVAL;
++		}
++		break;
++
+ 	case USB_DT_OTG:
+ 		if (length != sizeof(struct usb_otg_descriptor))
+ 			goto inv_length;

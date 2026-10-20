@@ -1,0 +1,5 @@
+presencemux-ffs (0.1.0) trixie; urgency=medium
+
+  * Accept the class-specific descriptors of the video class.
+
+ -- Jonas Meyer-Ohle <19151471+jonas-meyer@users.noreply.github.com>  Tue, 20 Oct 2026 14:50:47 +0100
