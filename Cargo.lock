@@ -1066,6 +1066,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "presencemux-uvc"
+version = "0.1.0"
+dependencies = [
+ "insta",
+ "proptest",
+ "thiserror",
+ "zerocopy",
+]
+
+[[package]]
 name = "presencemuxctl"
 version = "0.1.0"
 dependencies = [

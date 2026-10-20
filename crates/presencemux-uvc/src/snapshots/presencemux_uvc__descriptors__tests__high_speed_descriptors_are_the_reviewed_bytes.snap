@@ -1,0 +1,15 @@
+---
+source: crates/presencemux-uvc/src/descriptors.rs
+expression: dump
+---
+interface association: 08 0b 00 02 0e 03 00 01
+interface: 09 04 00 00 00 0e 01 00 01
+VC header: 0d 24 01 10 01 28 00 00 6c dc 02 01 01
+VC camera terminal: 12 24 02 01 01 02 00 00 00 00 00 00 00 00 03 00 00 00
+VC output terminal: 09 24 03 02 01 01 00 01 00
+interface: 09 04 01 00 01 0e 02 00 01
+VS input header: 0e 24 01 01 3d 00 81 00 02 00 00 00 01 00
+VS MJPEG format: 0b 24 06 01 01 00 01 00 00 00 00
+VS MJPEG frame: 1e 24 07 01 00 80 07 38 04 00 40 e3 09 00 80 c6 13 00 48 3f 00 15 16 05 00 01 15 16 05 00
+VS color matching: 06 24 0d 01 01 04
+endpoint: 07 05 81 02 00 02 00

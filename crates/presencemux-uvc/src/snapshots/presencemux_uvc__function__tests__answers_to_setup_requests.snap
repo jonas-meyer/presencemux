@@ -1,0 +1,45 @@
+---
+source: crates/presencemux-uvc/src/function.rs
+expression: table
+---
+request | code | answer | error code after
+probe | SET_CUR | read 34 | 00
+probe | GET_CUR | probe block | 00
+probe | GET_MIN | probe block | 00
+probe | GET_MAX | probe block | 00
+probe | GET_RES | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 00
+probe | GET_LEN | 22 00 | 00
+probe | GET_INFO | 03 | 00
+probe | GET_DEF | probe block | 00
+commit | SET_CUR | read 34 | 00
+commit | GET_CUR | probe block | 00
+commit | GET_MIN | stall | 00
+commit | GET_MAX | stall | 00
+commit | GET_RES | stall | 00
+commit | GET_LEN | 22 00 | 00
+commit | GET_INFO | 03 | 00
+commit | GET_DEF | stall | 00
+error code | SET_CUR | stall | 07
+error code | GET_CUR | 00 | 00
+error code | GET_MIN | stall | 07
+error code | GET_MAX | stall | 07
+error code | GET_RES | stall | 07
+error code | GET_LEN | stall | 07
+error code | GET_INFO | 01 | 00
+error code | GET_DEF | stall | 07
+unknown control | SET_CUR | stall | 06
+unknown control | GET_CUR | stall | 06
+unknown control | GET_MIN | stall | 06
+unknown control | GET_MAX | stall | 06
+unknown control | GET_RES | stall | 06
+unknown control | GET_LEN | stall | 06
+unknown control | GET_INFO | stall | 06
+unknown control | GET_DEF | stall | 06
+unknown interface | SET_CUR | stall | 00
+unknown interface | GET_CUR | stall | 00
+unknown interface | GET_MIN | stall | 00
+unknown interface | GET_MAX | stall | 00
+unknown interface | GET_RES | stall | 00
+unknown interface | GET_LEN | stall | 00
+unknown interface | GET_INFO | stall | 00
+unknown interface | GET_DEF | stall | 00

@@ -1,0 +1,17 @@
+[package]
+name = "presencemux-uvc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+zerocopy.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+proptest.workspace = true
